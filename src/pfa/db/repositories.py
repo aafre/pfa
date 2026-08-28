@@ -80,6 +80,11 @@ class RuleRepository:
         upper = description.upper()
         return next((rule for rule in rules if rule.pattern.upper() in upper), None)
 
+    def find_pattern(self, pattern: str) -> MerchantRuleModel | None:
+        return self.session.scalar(
+            select(MerchantRuleModel).where(MerchantRuleModel.pattern == pattern)
+        )
+
     def add(self, rule: MerchantRuleModel) -> MerchantRuleModel:
         self.session.add(rule)
         self.session.flush()

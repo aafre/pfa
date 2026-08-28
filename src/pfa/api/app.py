@@ -11,6 +11,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from pfa.ai.agents.advisor import build_advisor
+from pfa.ai.agents.categorizer import LocalTransactionClassifier
 from pfa.ai.deps import FinanceDependencies
 from pfa.ai.schemas import ChatRequest, ImportRequest
 from pfa.config import Settings, get_settings
@@ -80,7 +81,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="path must identify a local CSV file")
         engine, services = open_services(active_settings)
         try:
-            report = ImportService(services.uow).import_csv(path, request.dry_run)
+            report = ImportService(
+                services.uow, LocalTransactionClassifier(active_settings)
+            ).import_csv(path, request.dry_run)
             close_services(engine, services, not request.dry_run)
             return {
                 "imported": report.imported,

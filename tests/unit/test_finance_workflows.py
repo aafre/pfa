@@ -2,6 +2,7 @@ from datetime import date
 
 from pfa.analytics.service import AnalyticsService
 from pfa.db.engine import init_db, make_engine, make_session_factory
+from pfa.db.models import MerchantRuleModel
 from pfa.db.unit_of_work import UnitOfWork
 from pfa.domain.transactions import TransactionKind
 from pfa.ingestion.service import ImportService
@@ -57,4 +58,22 @@ def test_unknown_expense_is_reported_for_review(tmp_path) -> None:
         .kind
         == TransactionKind.EXPENSE.value
     )
+    session.close()
+
+
+def test_persisted_correction_rule_is_used_on_later_import(tmp_path) -> None:
+    path = tmp_path / "transactions.csv"
+    path.write_text("date,description,amount\n2026-08-01,LOCAL CAFE,-12.50\n")
+    from pfa.config import Settings
+
+    engine = make_engine(Settings(database_url="sqlite:///:memory:"))
+    init_db(engine)
+    session = make_session_factory(engine)()
+    uow = UnitOfWork(session)
+    uow.rules.add(MerchantRuleModel(pattern="LOCAL CAFE", kind="expense", category="eating_out"))
+    result = ImportService(uow).import_csv(path)
+    row = uow.transactions.all()[0]
+    assert result.requires_classification == 0
+    assert row.category == "eating_out"
+    assert row.classification_source == "rule"
     session.close()

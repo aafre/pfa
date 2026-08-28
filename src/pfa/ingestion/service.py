@@ -6,7 +6,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Protocol
 
-from pfa.db.models import TransactionModel
+from pfa.db.models import MerchantRuleModel, TransactionModel
 from pfa.db.unit_of_work import UnitOfWork
 from pfa.domain.errors import ImportRowError
 from pfa.domain.money import Money
@@ -88,6 +88,17 @@ def _classification(
     )
 
 
+def _classification_from_rule(rule: MerchantRuleModel) -> Classification:
+    return Classification(
+        kind=TransactionKind(rule.kind or TransactionKind.UNKNOWN.value),
+        category=SpendingCategory(rule.category) if rule.category else None,
+        transfer_purpose=TransferPurpose(rule.transfer_purpose) if rule.transfer_purpose else None,
+        source=ClassificationSource.RULE,
+        confidence=1.0,
+        reason="persisted merchant rule",
+    )
+
+
 class ImportService:
     def __init__(self, unit_of_work: UnitOfWork, classifier: Classifier | None = None):
         self.uow = unit_of_work
@@ -114,7 +125,12 @@ class ImportService:
                     if self.uow.transactions.find_fingerprint(fingerprint):
                         result.duplicates += 1
                         continue
-                    classification = _classification(row, sign, amount_minor, self.classifier)
+                    rule = self.uow.rules.match(row["description"])
+                    classification = (
+                        _classification_from_rule(rule)
+                        if rule
+                        else _classification(row, sign, amount_minor, self.classifier)
+                    )
                     account = self.uow.accounts.get_or_create(row["account"], row["currency"])
                     transaction = TransactionModel(
                         external_id=row["external_id"] or None,

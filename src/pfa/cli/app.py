@@ -14,8 +14,9 @@ from pfa.ai.agents.categorizer import LocalTransactionClassifier
 from pfa.ai.deps import FinanceDependencies
 from pfa.config import get_settings
 from pfa.db.engine import init_db, make_engine
-from pfa.db.models import BudgetModel, GoalModel
+from pfa.db.models import BudgetModel, GoalModel, MerchantRuleModel, TransactionModel
 from pfa.domain.money import Money
+from pfa.domain.transactions import ClassificationSource, SpendingCategory
 from pfa.ingestion.service import ImportService
 from pfa.services.answers import deterministic_answer
 from pfa.services.health import health_report
@@ -77,6 +78,7 @@ def db_migrate() -> None:
     from alembic.config import Config
 
     config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", get_settings().database_url.replace("%", "%%"))
     command.upgrade(config, "head")
     console.print("Database migrated")
 
@@ -155,6 +157,42 @@ def transactions_uncategorized() -> None:
             )
     finally:
         close_services(engine, services)
+
+
+@transactions_app.command("correct")
+def transactions_correct(
+    transaction_id: int,
+    category: SpendingCategory = typer.Option(..., "--category"),  # noqa: B008
+) -> None:
+    """Correct one transaction and persist a narrow exact-description rule."""
+    engine, services = open_services(get_settings())
+    try:
+        row = services.uow.session.get(TransactionModel, transaction_id)
+        if row is None:
+            raise typer.BadParameter(f"transaction {transaction_id} not found")
+        row.category = category.value
+        row.classification_source = ClassificationSource.USER.value
+        row.classification_confidence = 1.0
+        row.classification_reason = "explicit user correction"
+        pattern = row.normalized_description
+        if services.uow.rules.find_pattern(pattern) is None:
+            services.uow.rules.add(
+                MerchantRuleModel(
+                    pattern=pattern,
+                    kind=row.kind,
+                    category=category.value,
+                    transfer_purpose=row.transfer_purpose,
+                    created_from_user_correction=True,
+                )
+            )
+        close_services(engine, services)
+        console.print(
+            f"Corrected transaction {transaction_id}; "
+            f"future exact descriptions use {category.value}"
+        )
+    except Exception:
+        close_services(engine, services, False)
+        raise
 
 
 @app.command("ask")
