@@ -1,5 +1,13 @@
-from pfa.ai.agents.advisor import _INSTRUCTIONS, build_advisor
+import pytest
+from pydantic_ai import ModelRetry
+
+from pfa.ai.agents.advisor import (
+    _INSTRUCTIONS,
+    build_advisor,
+    require_grounded_financial_numbers,
+)
 from pfa.ai.schemas import TransactionClassification
+from pfa.ai.tools.finance import display_money_fields
 from pfa.config import Settings
 from pfa.domain.transactions import SpendingCategory, TransactionKind, TransferPurpose
 
@@ -41,3 +49,15 @@ def test_advisor_exposes_only_narrow_read_only_tools_and_marks_data_untrusted() 
     assert all(word not in " ".join(tool_names) for word in ("sql", "transfer_money", "trade"))
     assert "untrusted data" in _INSTRUCTIONS
     assert "execute SQL" in _INSTRUCTIONS
+
+
+def test_harness_rejects_ungrounded_financial_numbers_and_formats_minor_units() -> None:
+    context = type("Context", (), {"messages": []})()
+
+    with pytest.raises(ModelRetry, match="require a deterministic tool result"):
+        require_grounded_financial_numbers(context, "You spent £450.00")  # type: ignore[arg-type]
+
+    assert display_money_fields({"target_minor": 100_000}) == {
+        "target_minor": 100_000,
+        "target_display": "GBP 1,000.00",
+    }
