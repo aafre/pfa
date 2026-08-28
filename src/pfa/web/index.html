@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#16252e" />
+    <title>PFA — Personal Finance Agent</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Primary navigation">
+        <a class="brand" href="/" aria-label="PFA overview">
+          <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+          <span>
+            <strong>PFA</strong>
+            <small>personal finance agent</small>
+          </span>
+        </a>
+
+        <div class="sidebar-rule"></div>
+        <p class="nav-label">Workspace</p>
+        <nav class="nav-list">
+          <a class="nav-item is-active" href="#overview" data-route="overview"><span class="nav-icon nav-icon-overview" aria-hidden="true"></span>Overview</a>
+          <a class="nav-item" href="#activity" data-route="activity"><span class="nav-icon nav-icon-activity" aria-hidden="true"></span>Activity</a>
+          <a class="nav-item" href="#plan" data-route="plan"><span class="nav-icon nav-icon-plan" aria-hidden="true"></span>Plan</a>
+          <a class="nav-item" href="#scenarios" data-route="scenarios"><span class="nav-icon nav-icon-scenarios" aria-hidden="true"></span>Scenarios</a>
+          <a class="nav-item" href="#review" data-route="review"><span class="nav-icon nav-icon-review" aria-hidden="true"></span>Review <span class="nav-count">4</span></a>
+          <a class="nav-item" href="#ask" data-route="ask"><span class="nav-icon nav-icon-ask" aria-hidden="true"></span>Ask</a>
+          <a class="nav-item" href="#import" data-route="import"><span class="nav-icon nav-icon-import" aria-hidden="true"></span>Import</a>
+        </nav>
+
+        <div class="sidebar-bottom">
+          <div class="local-status"><span class="status-dot"></span><span><strong>Local only</strong><small>Your data stays here</small></span></div>
+          <button class="profile-button" type="button" aria-label="Open account settings"><span class="avatar">JM</span><span>Jordan’s workspace</span><span aria-hidden="true">···</span></button>
+        </div>
+      </aside>
+
+      <main class="main-content" id="main-content">
+        <header class="topbar">
+          <div class="breadcrumb"><span>Workspace</span><span class="crumb-slash">/</span><strong>Overview</strong></div>
+          <div class="topbar-actions">
+            <span class="sync-note" id="sync-note"><span class="sync-pulse"></span>Synced moments ago</span>
+            <button class="icon-button" type="button" aria-label="Open notifications"><span class="bell-icon" aria-hidden="true"></span><span class="notification-dot"></span></button>
+            <button class="help-button" type="button" aria-label="Help">?</button>
+          </div>
+        </header>
+
+        <div class="content-wrap">
+          <section class="page-heading" aria-labelledby="page-title">
+            <div>
+              <p class="eyebrow">Monthly position</p>
+              <h1 id="page-title">Money, in view.</h1>
+              <p class="lede">A clear read on what changed, what matters, and where to look next.</p>
+            </div>
+            <div class="month-controls" aria-label="Choose month">
+              <button class="month-arrow" type="button" data-month-step="-1" aria-label="Previous month">←</button>
+              <button class="month-current" type="button" id="month-current" aria-haspopup="listbox" aria-expanded="false"><span class="calendar-mini" aria-hidden="true"></span><span id="month-label">August 2026</span><span class="chevron" aria-hidden="true">⌄</span></button>
+              <button class="month-arrow" type="button" data-month-step="1" aria-label="Next month">→</button>
+              <div class="month-menu" id="month-menu" role="listbox" aria-label="Available months" hidden></div>
+            </div>
+          </section>
+
+          <section class="metric-band" id="metric-band" aria-label="August 2026 financial summary">
+            <article class="metric-cell">
+              <div class="metric-head"><span>Income</span><span class="metric-marker marker-up">↗</span></div>
+              <strong class="metric-value" id="income-value">£3,500</strong>
+              <span class="metric-foot" id="income-change">Same as July</span>
+            </article>
+            <article class="metric-cell metric-cell-spend">
+              <div class="metric-head"><span>Spending</span><span class="metric-marker marker-warn">↗</span></div>
+              <strong class="metric-value" id="spending-value">£3,111</strong>
+              <span class="metric-foot is-warn" id="spending-change">£1,110 above July</span>
+            </article>
+            <article class="metric-cell">
+              <div class="metric-head"><span>Net movement</span><span class="metric-marker marker-down">↘</span></div>
+              <strong class="metric-value" id="net-value">−£311</strong>
+              <span class="metric-foot is-warn" id="net-change">£1,110 lower than July</span>
+            </article>
+            <article class="metric-cell">
+              <div class="metric-head"><span>Savings rate</span><span class="metric-marker marker-neutral">—</span></div>
+              <strong class="metric-value" id="rate-value">0.0%</strong>
+              <span class="metric-foot" id="rate-change">8.5 pts lower than July</span>
+            </article>
+          </section>
+
+          <div class="content-grid">
+            <section class="review-column" aria-labelledby="review-heading">
+              <div class="section-heading">
+                <div>
+                  <p class="eyebrow">Evidence trail</p>
+                  <h2 id="review-heading">August review</h2>
+                </div>
+                <span class="data-chip"><span class="chip-dot"></span><span id="transaction-count">12</span> transactions</span>
+              </div>
+
+              <article class="audit-panel">
+                <div class="audit-intro">
+                  <div class="audit-score"><span class="score-number">02</span><span class="score-label">items to<br />inspect</span></div>
+                  <div>
+                    <h3>Most of the change is in two places.</h3>
+                    <p id="review-copy">Spending moved up <strong id="review-delta">£1,110</strong> from July. The evidence points to one new category and a heavier month for eating out.</p>
+                  </div>
+                </div>
+                <div class="audit-list" id="audit-list">
+                  <button class="audit-row is-primary" type="button" data-evidence="shopping">
+                    <span class="audit-index">01</span><span class="audit-signal signal-orange"></span>
+                    <span class="audit-copy"><strong>Shopping is the new pressure point</strong><small>£780 this month · no July baseline</small></span>
+                    <span class="audit-amount">+£780</span><span class="row-arrow" aria-hidden="true">↗</span>
+                  </button>
+                  <button class="audit-row" type="button" data-evidence="eating_out">
+                    <span class="audit-index">02</span><span class="audit-signal signal-amber"></span>
+                    <span class="audit-copy"><strong>Eating out rose faster than any regular category</strong><small>£260 this month · £80 above July</small></span>
+                    <span class="audit-amount">+£80</span><span class="row-arrow" aria-hidden="true">↗</span>
+                  </button>
+                </div>
+                <div class="audit-footer"><span><span class="evidence-icon" aria-hidden="true">⌁</span> Deterministic analysis · 12 source transactions</span><button type="button" class="text-button" id="open-evidence">View evidence <span aria-hidden="true">→</span></button></div>
+              </article>
+
+              <div class="lower-grid">
+                <section class="category-panel panel" aria-labelledby="category-heading">
+                  <div class="panel-header"><div><p class="eyebrow">Where it went</p><h2 id="category-heading">Spending by category</h2></div><button class="more-button" type="button" aria-label="More category options">···</button></div>
+                  <div class="category-chart" id="category-chart" role="img" aria-label="Spending by category bar chart"></div>
+                  <table class="sr-only" id="category-table"><caption>Spending by category for the selected month</caption><thead><tr><th scope="col">Category</th><th scope="col">Amount</th></tr></thead><tbody></tbody></table>
+                  <div class="legend-row"><span><i class="legend-swatch swatch-orange"></i>Core</span><span><i class="legend-swatch swatch-ink"></i>Flexible</span><span><i class="legend-swatch swatch-tan"></i>One-off</span></div>
+                </section>
+
+                <section class="cashflow-panel panel" aria-labelledby="cashflow-heading">
+                  <div class="panel-header"><div><p class="eyebrow">Three-month read</p><h2 id="cashflow-heading">Cashflow rhythm</h2></div><span class="trend-label">Jun — Aug</span></div>
+                  <div class="cashflow-chart" role="img" aria-label="Income and spending trend for June to August"><div class="chart-grid"><span></span><span></span><span></span></div><div class="chart-bars" id="cashflow-bars"></div></div>
+                  <div class="legend-row"><span><i class="legend-swatch swatch-green"></i>Income</span><span><i class="legend-swatch swatch-orange"></i>Spending</span></div>
+                </section>
+              </div>
+            </section>
+
+            <aside class="side-column" aria-label="Review queue and data health">
+              <section class="queue-panel panel" aria-labelledby="queue-heading">
+                <div class="panel-header"><div><p class="eyebrow">Next inspections</p><h2 id="queue-heading">Review queue</h2></div><span class="queue-count">4</span></div>
+                <div class="queue-list">
+                  <button class="queue-item" type="button"><span class="queue-icon queue-icon-flag">!</span><span><strong>1 category spike</strong><small>Shopping · new this month</small></span><span class="row-arrow" aria-hidden="true">→</span></button>
+                  <button class="queue-item" type="button"><span class="queue-icon queue-icon-clock">◷</span><span><strong>2 recurring payments</strong><small>Due in the next 7 days</small></span><span class="row-arrow" aria-hidden="true">→</span></button>
+                  <button class="queue-item" type="button"><span class="queue-icon queue-icon-check">✓</span><span><strong>1 goal to revisit</strong><small>Emergency fund · 42%</small></span><span class="row-arrow" aria-hidden="true">→</span></button>
+                </div>
+                <button class="queue-footer" type="button">Open full review <span aria-hidden="true">↗</span></button>
+              </section>
+
+              <section class="health-panel panel" aria-labelledby="health-heading">
+                <div class="health-header"><span class="health-mark" aria-hidden="true">+</span><div><p class="eyebrow">Data health</p><h2 id="health-heading">Good to go</h2></div><span class="health-status" id="health-status">Healthy</span></div>
+                <p class="health-copy">Your calculations are up to date. All figures below use the local database.</p>
+                <div class="health-meta"><span><span class="tiny-dot"></span>Database</span><strong id="database-status">Connected</strong></div><div class="health-meta"><span><span class="tiny-dot"></span>Model</span><strong id="model-status">Optional</strong></div>
+              </section>
+
+              <section class="prompt-panel" aria-labelledby="prompt-heading"><span class="prompt-spark" aria-hidden="true">✳</span><p class="eyebrow">Have a question?</p><h2 id="prompt-heading">Ask about this month.</h2><p>Get a plain-language answer with the facts used alongside it.</p><button class="prompt-button" type="button">Ask PFA <span aria-hidden="true">→</span></button></section>
+            </aside>
+          </div>
+
+          <footer class="page-footer"><span>PFA <span aria-hidden="true">·</span> Evidence over guesswork</span><span>Last calculated <time id="last-calculated">28 Aug 2026, 09:42</time></span></footer>
+        </div>
+      </main>
+    </div>
+
+    <dialog class="evidence-dialog" id="evidence-dialog" aria-labelledby="dialog-title">
+      <div class="dialog-header"><div><p class="eyebrow">Traceable by design</p><h2 id="dialog-title">Evidence used</h2></div><button class="dialog-close" type="button" aria-label="Close evidence">×</button></div>
+      <p class="dialog-lede">Every insight below is calculated from the local transaction ledger. Nothing here depends on a model guess.</p>
+      <div class="evidence-detail" id="evidence-detail"></div>
+      <div class="dialog-actions"><button class="button-secondary dialog-close" type="button">Close</button><button class="button-primary" type="button">Open Activity <span aria-hidden="true">→</span></button></div>
+    </dialog>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="/static/app.js?v=5" defer></script>
+  </body>
+</html>
