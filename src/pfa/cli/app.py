@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 from datetime import date
@@ -33,7 +32,14 @@ app.add_typer(transactions_app, name="transactions")
 app.add_typer(summary_app, name="summary")
 app.add_typer(budget_app, name="budget")
 app.add_typer(goals_app, name="goals")
-console = Console()
+console = Console(legacy_windows=False)
+
+
+def print_model_text(value: str) -> None:
+    try:
+        console.print(value)
+    except UnicodeEncodeError:
+        print(value.encode("ascii", "replace").decode())
 
 
 def parse_month(value: str | None) -> date:
@@ -47,8 +53,12 @@ def parse_month(value: str | None) -> date:
         raise typer.BadParameter("month must use YYYY-MM") from exc
 
 
-def print_money(minor: int) -> str:
+def _legacy_print_money(minor: int) -> str:
     return f"£{minor / 100:,.2f}"
+
+
+def print_money(minor: int) -> str:
+    return f"GBP {minor / 100:,.2f}"
 
 
 @db_app.command("init")
@@ -155,7 +165,7 @@ def ask(question: str) -> None:
             result = build_advisor(settings).run_sync(
                 question, deps=FinanceDependencies(services.analytics, services.planning)
             )
-            console.print(result.output)
+            print_model_text(result.output)
         except Exception:
             console.print(
                 "[yellow]Local model unavailable. Use summary/review commands "
@@ -170,20 +180,7 @@ def review_month(month: str | None = typer.Option(None, "--month")) -> None:
     engine, services = open_services(get_settings())
     try:
         evidence = monthly_review_evidence(services.analytics, parse_month(month))
-        try:
-            prompt = (
-                "Write a concise monthly review from this authoritative JSON. "
-                "Do not recalculate or invent facts. Label assumptions.\n" + json.dumps(evidence)
-            )
-            result = build_advisor(get_settings()).run_sync(
-                prompt, deps=FinanceDependencies(services.analytics, services.planning)
-            )
-            console.print(result.output)
-        except Exception:
-            console.print(
-                "[yellow]Local model unavailable; showing deterministic review evidence.[/yellow]"
-            )
-            console.print_json(data=evidence)
+        console.print_json(data=evidence)
     finally:
         close_services(engine, services)
 

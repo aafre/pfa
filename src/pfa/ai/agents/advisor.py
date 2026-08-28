@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date
+
 from pydantic_ai import Agent
 
 from pfa.ai.deps import FinanceDependencies
@@ -33,7 +35,11 @@ def build_advisor(settings: Settings) -> Agent[FinanceDependencies, str]:
         local_model(settings),
         deps_type=FinanceDependencies,
         output_type=str,
-        system_prompt=_INSTRUCTIONS,
+        system_prompt=(
+            _INSTRUCTIONS
+            + f"\nToday is {date.today().isoformat()}. "
+            "If a month has no year, use the current year."
+        ),
         tools=[
             get_monthly_summary,
             get_category_spending,
