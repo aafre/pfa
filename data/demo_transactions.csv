@@ -1,0 +1,35 @@
+date,description,amount,currency,kind,category,transfer_purpose,account,external_id
+2026-06-01,Salary,3500,GBP,income,,,Main account,jun-salary
+2026-06-02,Rent,-1200,GBP,expense,housing,,Main account,jun-rent
+2026-06-03,Tesco groceries,-320,GBP,expense,groceries,,Main account,jun-tesco
+2026-06-05,Netflix,-15.99,GBP,expense,subscriptions,,Main account,jun-netflix
+2026-06-07,Electric bill,-85,GBP,expense,utilities,,Main account,jun-electric
+2026-06-09,Restaurant dinner,-110,GBP,expense,eating_out,,Main account,jun-restaurant
+2026-06-12,Train travel,-90,GBP,expense,transport,,Main account,jun-train
+2026-06-15,Savings transfer,-400,GBP,transfer,,saving,Main account,jun-saving
+2026-06-20,Investment ISA transfer,-300,GBP,transfer,,investment,Main account,jun-invest
+2026-06-25,ATM cash withdrawal,-60,GBP,cash_withdrawal,,,Main account,jun-atm
+2026-06-28,Card purchase refund,35,GBP,refund,,,Main account,jun-refund
+2026-07-01,Salary,3500,GBP,income,,,Main account,jul-salary
+2026-07-02,Rent,-1200,GBP,expense,housing,,Main account,jul-rent
+2026-07-03,Tesco groceries,-360,GBP,expense,groceries,,Main account,jul-tesco
+2026-07-05,Netflix,-15.99,GBP,expense,subscriptions,,Main account,jul-netflix
+2026-07-07,Electric bill,-92,GBP,expense,utilities,,Main account,jul-electric
+2026-07-09,Restaurant dinner,-180,GBP,expense,eating_out,,Main account,jul-restaurant
+2026-07-12,Train travel,-105,GBP,expense,transport,,Main account,jul-train
+2026-07-15,Savings transfer,-400,GBP,transfer,,saving,Main account,jul-saving
+2026-07-20,Investment ISA transfer,-300,GBP,transfer,,investment,Main account,jul-invest
+2026-07-25,ATM cash withdrawal,-60,GBP,cash_withdrawal,,,Main account,jul-atm
+2026-07-27,Water bill,-48,GBP,expense,utilities,,Main account,jul-water
+2026-08-01,Salary,3500,GBP,income,,,Main account,aug-salary
+2026-08-02,Rent,-1200,GBP,expense,housing,,Main account,aug-rent
+2026-08-03,Tesco groceries,-390,GBP,expense,groceries,,Main account,aug-tesco
+2026-08-05,Netflix,-15.99,GBP,expense,subscriptions,,Main account,aug-netflix
+2026-08-07,Electric bill,-95,GBP,expense,utilities,,Main account,aug-electric
+2026-08-09,Restaurant dinner,-260,GBP,expense,eating_out,,Main account,aug-restaurant
+2026-08-10,Large electronics purchase,-780,GBP,expense,shopping,,Main account,aug-electronics
+2026-08-12,Train travel,-120,GBP,expense,transport,,Main account,aug-train
+2026-08-15,Savings transfer,-400,GBP,transfer,,saving,Main account,aug-saving
+2026-08-20,Investment ISA transfer,-300,GBP,transfer,,investment,Main account,aug-invest
+2026-08-25,ATM cash withdrawal,-60,GBP,cash_withdrawal,,,Main account,aug-atm
+2026-08-27,Loan repayment,-250,GBP,expense,debt_payment,,Main account,aug-loan
