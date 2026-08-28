@@ -246,9 +246,10 @@ is unavailable. Repeat imports are safe. Use `--dry-run` to validate without per
 ### Planned statement upload
 
 The next ingestion slice adds browser upload, preview-before-commit, actionable row errors, import
-history, and adapters for CSV and text-based PDF statements. Initial PDF support deliberately excludes
-scanned/image-only statements and OCR; unreadable PDFs must fail clearly without changing financial
-state. See the [statement upload and PDF extraction requirements](docs/plans/2026-08-28-statement-upload-pdf-extraction-design.md).
+history, and adapters for CSV and PDF statements. Digital PDFs use native text/table extraction first;
+scanned pages may fall back to local Tesseract OCR. OCR-derived financial values require explicit review,
+and unsupported or unreadable layouts must fail clearly without changing financial state. See the
+[statement upload and PDF extraction requirements](docs/plans/2026-08-28-statement-upload-pdf-extraction-design.md).
 
 ## API
 
