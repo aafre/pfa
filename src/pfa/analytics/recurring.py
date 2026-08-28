@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from decimal import ROUND_HALF_UP, Decimal
 from statistics import median
 
 from pfa.db.models import TransactionModel
@@ -42,10 +43,13 @@ def detect_recurring(transactions: list[TransactionModel]) -> list[dict[str, obj
         else:
             continue
         amounts = [item.amount_minor for item in observations]
-        average = sum(amounts) / len(amounts)
-        similar = sum(abs(amount - average) / max(average, 1) <= 0.15 for amount in amounts)
-        similarity_ratio = similar / len(amounts)
-        if similarity_ratio < 0.67:
+        average = Decimal(sum(amounts)) / len(amounts)
+        similar = sum(
+            Decimal(abs(Decimal(amount) - average)) / max(average, Decimal(1)) <= Decimal("0.15")
+            for amount in amounts
+        )
+        similarity_ratio = Decimal(similar) / len(amounts)
+        if similarity_ratio < Decimal("0.67"):
             continue
         found.append(
             {
@@ -55,8 +59,10 @@ def detect_recurring(transactions: list[TransactionModel]) -> list[dict[str, obj
                 "cadence": cadence,
                 "observations": len(observations),
                 "median_gap_days": typical_gap,
-                "amount_similarity_ratio": round(similarity_ratio, 2),
-                "average_amount_minor": round(average),
+                "amount_similarity_ratio": float(
+                    similarity_ratio.quantize(Decimal("0.01"), ROUND_HALF_UP)
+                ),
+                "average_amount_minor": int(average.quantize(Decimal("1"), ROUND_HALF_UP)),
                 "last_seen": max(item.transaction_date for item in observations).isoformat(),
             }
         )

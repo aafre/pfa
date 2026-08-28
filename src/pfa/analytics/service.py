@@ -3,6 +3,7 @@ from __future__ import annotations
 import calendar
 from collections import defaultdict
 from datetime import date, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 
 from pfa.db.models import AccountModel, TransactionModel
 from pfa.db.repositories import BudgetRepository, GoalRepository, TransactionRepository
@@ -90,7 +91,15 @@ class AnalyticsService:
         debt = sum(
             _spending(row) for row in rows if row.category == SpendingCategory.DEBT_PAYMENT.value
         )
-        rate = round((savings + investments) / income * 100, 2) if income else 0.0
+        rate = (
+            float(
+                (Decimal(savings + investments) / Decimal(income) * 100).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+            )
+            if income
+            else 0.0
+        )
         return MonthlySummary(
             period=start.strftime("%Y-%m"),
             income_minor=income,
@@ -186,7 +195,11 @@ class AnalyticsService:
                 goal_type=goal.goal_type,
                 current_minor=goal.current_minor,
                 target_minor=goal.target_minor,
-                progress_percent=round(goal.current_minor / goal.target_minor * 100, 2)
+                progress_percent=float(
+                    (Decimal(goal.current_minor) / Decimal(goal.target_minor) * 100).quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP
+                    )
+                )
                 if goal.target_minor
                 else 0,
                 target_date=goal.target_date.isoformat() if goal.target_date else None,

@@ -57,11 +57,11 @@ def parse_month(value: str | None) -> date:
 
 
 def _legacy_print_money(minor: int) -> str:
-    return f"£{minor / 100:,.2f}"
+    return f"£{Money(minor).to_major():,.2f}"
 
 
 def print_money(minor: int) -> str:
-    return f"GBP {minor / 100:,.2f}"
+    return f"GBP {Money(minor).to_major():,.2f}"
 
 
 @db_app.command("init")

@@ -30,7 +30,7 @@ _MONTHS = {
 
 
 def _amount(minor: int) -> str:
-    return f"GBP {minor / 100:,.2f}"
+    return f"GBP {Money(minor).to_major():,.2f}"
 
 
 def _period_for_name(analytics: AnalyticsService, name: str) -> date | None:

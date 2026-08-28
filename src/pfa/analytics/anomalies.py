@@ -3,6 +3,7 @@ from __future__ import annotations
 import calendar
 from collections import defaultdict
 from datetime import date
+from decimal import Decimal
 
 from pfa.db.models import TransactionModel
 
@@ -27,7 +28,7 @@ def unusual_transactions(
     values = [_spending(row) for row in transactions if _spending(row) > 0]
     if not values:
         return []
-    threshold = max(sum(values) / len(values) * 2.5, 10_000)
+    threshold = max(Decimal(sum(values)) / len(values) * Decimal("2.5"), Decimal(10_000))
     start, end = _bounds(period)
     return [
         {

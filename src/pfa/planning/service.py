@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 
 from pydantic import BaseModel, Field
 
@@ -35,7 +36,11 @@ class PlanningService:
         for _ in range(months):
             cursor = (cursor.replace(day=1) - timedelta(days=1)).replace(day=1)
             values.append(self.analytics.monthly_summary(cursor).net_cashflow_minor)
-        return round(sum(values) / len(values)) if values else 0
+        return (
+            int((Decimal(sum(values)) / len(values)).quantize(Decimal("1"), ROUND_HALF_UP))
+            if values
+            else 0
+        )
 
     def _average_monthly_spending(self, as_of: date, months: int = 3) -> int:
         values = []
@@ -43,7 +48,11 @@ class PlanningService:
         for _ in range(months):
             cursor = (cursor.replace(day=1) - timedelta(days=1)).replace(day=1)
             values.append(max(self.analytics.monthly_summary(cursor).spending_minor, 0))
-        return round(sum(values) / len(values)) if values else 0
+        return (
+            int((Decimal(sum(values)) / len(values)).quantize(Decimal("1"), ROUND_HALF_UP))
+            if values
+            else 0
+        )
 
     def simulate_purchase(
         self, cost_minor: int, horizon_months: int = 3, as_of: date | None = None
@@ -54,7 +63,15 @@ class PlanningService:
         average_expenses = self._average_monthly_spending(as_of)
         baseline = starting + monthly_net * horizon_months
         scenario = baseline - cost_minor
-        months = round(max(scenario, 0) / average_expenses, 2) if average_expenses else None
+        months = (
+            float(
+                (Decimal(max(scenario, 0)) / Decimal(average_expenses)).quantize(
+                    Decimal("0.01"), ROUND_HALF_UP
+                )
+            )
+            if average_expenses
+            else None
+        )
         return ScenarioResult(
             starting_cash_minor=starting,
             scenario_cost_minor=cost_minor,
