@@ -6,7 +6,8 @@ never cross the extractor boundary.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -107,3 +108,18 @@ class StatementExtractor(Protocol):
     name: str
 
     def extract(self, source: StatementSource) -> ExtractionResult: ...
+
+
+def candidates_to_json(candidates: list[CandidateTransaction]) -> str:
+    """Serialize candidates for the ImportBatchModel.candidates_json blob."""
+    return json.dumps([asdict(candidate) for candidate in candidates])
+
+
+def candidates_from_json(payload: str) -> list[CandidateTransaction]:
+    """Inverse of candidates_to_json. Round-trips a candidate list losslessly."""
+    rows = json.loads(payload)
+    result = []
+    for row in rows:
+        issues = [CandidateIssue(**issue) for issue in row.pop("issues")]
+        result.append(CandidateTransaction(**row, issues=issues))
+    return result

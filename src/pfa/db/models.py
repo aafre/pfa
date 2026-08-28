@@ -2,7 +2,17 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, UniqueConstraint, func
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -70,6 +80,38 @@ class GoalModel(Base):
     current_minor: Mapped[int] = mapped_column(Integer, default=0)
     target_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class ImportBatchModel(Base):
+    """A staged statement upload awaiting review. Candidate rows are a JSON blob, not a
+    second table: they live 24 hours and are only ever read whole (see A3 in the
+    implementation plan for the reasoning).
+    """
+
+    __tablename__ = "import_batches"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)  # uuid4().hex
+    original_filename: Mapped[str] = mapped_column(String(255))
+    media_type: Mapped[str] = mapped_column(String(100))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64))
+    extractor: Mapped[str] = mapped_column(String(60))
+    status: Mapped[str] = mapped_column(String(20), index=True)
+    destination_account: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    detected_account: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    detected_currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    statement_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    statement_end: Mapped[date | None] = mapped_column(Date, nullable=True)
+    page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    candidates_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    issues_json: Mapped[str] = mapped_column(Text, default="[]")
+    counts_json: Mapped[str] = mapped_column(Text, default="{}")
+    committed_transaction_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    committed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class MerchantRuleModel(Base):

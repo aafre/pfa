@@ -4,6 +4,7 @@ from .repositories import (
     AccountRepository,
     BudgetRepository,
     GoalRepository,
+    ImportBatchRepository,
     RuleRepository,
     TransactionRepository,
 )
@@ -19,3 +20,4 @@ class UnitOfWork:
         self.rules = RuleRepository(session)
         self.budgets = BudgetRepository(session)
         self.goals = GoalRepository(session)
+        self.import_batches = ImportBatchRepository(session)
