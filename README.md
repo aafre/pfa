@@ -16,7 +16,7 @@ PFA understands your financial position over time, explains where money is going
 - [Ollama](https://ollama.com/) running locally
 
 ```bash
-ollama pull qwen3:4b
+ollama pull qwen3.5:4b
 ```
 
 
@@ -200,7 +200,7 @@ works without Ollama.
 ```bash
 uv sync
 uv run pfa db migrate
-ollama pull qwen3:4b
+ollama pull qwen3.5:4b
 ```
 
 Configuration is local by default. Copy `.env.example` to `.env` to change `PFA_DATABASE_URL`,

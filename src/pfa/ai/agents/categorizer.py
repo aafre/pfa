@@ -39,6 +39,8 @@ class LocalTransactionClassifier:
             model_settings=ModelSettings(
                 timeout=self.settings.agent_request_timeout_seconds,
                 max_tokens=self.settings.agent_output_token_limit,
+                temperature=0.0,
+                seed=0,
             ),
         )
         return self.agent

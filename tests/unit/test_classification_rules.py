@@ -1,3 +1,8 @@
+import pytest
+from pydantic_ai.models.test import TestModel
+
+from pfa.ai.agents import categorizer as categorizer_module
+from pfa.ai.agents.categorizer import LocalTransactionClassifier
 from pfa.config import Settings
 from pfa.db.engine import init_db, make_engine, make_session_factory
 from pfa.db.models import MerchantRuleModel
@@ -36,3 +41,20 @@ def test_user_correction_rules_are_normalized_exact_matches() -> None:
     assert uow.rules.match("A LOCAL CAFE") is None
     session.close()
     engine.dispose()
+
+
+def test_ai_classifier_uses_deterministic_sampling(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(model="test-model")
+    monkeypatch.setattr(
+        categorizer_module,
+        "available_models",
+        lambda _settings: {settings.model},
+    )
+    monkeypatch.setattr(categorizer_module, "local_model", lambda _settings: TestModel())
+
+    agent = LocalTransactionClassifier(settings)._available_agent()
+
+    assert agent is not None
+    assert agent.model_settings is not None
+    assert agent.model_settings["temperature"] == 0.0
+    assert agent.model_settings["seed"] == 0

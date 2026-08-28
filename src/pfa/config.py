@@ -11,7 +11,7 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite:///data/pfa.db"
     ollama_base_url: str = "http://localhost:11434"
-    model: str = "qwen3:4b"
+    model: str = "qwen3.5:4b"
     log_level: str = "INFO"
     agent_retries: int = Field(default=1, ge=0, le=3)
     agent_tool_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
