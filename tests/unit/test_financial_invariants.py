@@ -133,3 +133,27 @@ def test_unsupported_currency_fails_closed_instead_of_reporting_false_gbp(tmp_pa
     assert uow.transactions.all() == []
     uow.session.close()
     engine.dispose()
+
+
+def test_classifier_receives_signed_amounts_from_the_bank_format_adapter(tmp_path) -> None:
+    class RecordingClassifier:
+        def __init__(self) -> None:
+            self.amounts: list[int] = []
+
+        def classify(self, description: str, signed_amount_minor: int) -> None:
+            self.amounts.append(signed_amount_minor)
+
+    path = tmp_path / "signs.csv"
+    path.write_text(
+        "date,description,amount\n"
+        "2026-08-01,Unknown debit,-12.50\n"
+        "2026-08-02,Unknown credit,2.50\n",
+        encoding="utf-8",
+    )
+    engine, uow, _ = services()
+    classifier = RecordingClassifier()
+    ImportService(uow, classifier).import_csv(path)
+
+    assert classifier.amounts == [-1_250, 250]
+    uow.session.close()
+    engine.dispose()

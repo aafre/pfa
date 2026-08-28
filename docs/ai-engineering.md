@@ -6,13 +6,15 @@ PFA keeps probabilistic interpretation behind a small, testable boundary.
 
 The advisor contract lives in `src/pfa/ai/agents/advisor.py`. It tells the model to call tools
 before financial claims, avoid arithmetic, separate facts from assumptions, and remain advisory.
-The classifier has a separate short instruction because classification is a narrower task.
+It also marks persisted financial text and tool results as untrusted data. The classifier has a
+separate short instruction because classification is a narrower task.
 
 ## Structured output
 
 `TransactionClassification` in `src/pfa/ai/schemas.py` is the classifier's output contract.
-PydanticAI validates the model response and retries according to configured limits. Invalid or
-unknown output never becomes a silent financial fact.
+PydanticAI validates the model response. Application validation removes categories from income and
+transfer results and removes transfer purposes from non-transfers. Unknown or failed output leaves
+the imported row unresolved for review instead of becoming a silent financial fact.
 
 ## Tool calling and the agent loop
 
@@ -43,7 +45,8 @@ not an automatic transcript memory store.
 
 The harness is the surrounding reliability boundary: typed tool registry, Pydantic validation,
 dependency injection, bounded retries, tool timeouts, local-only model configuration, structured
-health reporting, and graceful inference failure. Initial tools are read-only. There is no tool
+health reporting, request/time/output limits, and graceful inference failure. Initial tools are
+read-only. There is no tool
 for money movement, brokerage execution, or arbitrary database access.
 
 ## Workflow and termination
@@ -55,8 +58,11 @@ PydanticAI has configured retries and the application does not create an unbound
 ## Evals versus tests
 
 Unit and integration tests prove money semantics, persistence, tools, and API behavior without
-Ollama. Real-model evals belong under `evals/` and measure classification or grounded answers;
-they are slower, model-dependent, and excluded from normal `pytest`.
+Ollama. Real-model evals belong under `evals/`; they are slower, model-dependent, and excluded from
+normal `pytest`. The checked-in four-case classifier eval is only a compatibility smoke for signed
+input and structured output. Its cases are handled by deterministic rules in normal imports, so its
+accuracy must not be presented as production classifier quality. A representative residual-case
+dataset and grounded-answer eval remain required before broader model-quality claims.
 
 ## Deterministic versus probabilistic
 

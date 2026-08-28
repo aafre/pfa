@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+from pydantic_ai import UsageLimits
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -172,7 +173,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return {"answer": deterministic}
             try:
                 result = build_advisor(active_settings).run_sync(
-                    request.message, deps=FinanceDependencies(services.analytics, services.planning)
+                    request.message,
+                    deps=FinanceDependencies(services.analytics, services.planning),
+                    usage_limits=UsageLimits(request_limit=active_settings.agent_request_limit),
                 )
             except Exception as exc:
                 raise HTTPException(

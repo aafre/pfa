@@ -241,8 +241,10 @@ uv run pytest
 uv run pfa eval-classifier  # requires a running Ollama model
 ```
 
-The normal test suite never calls Ollama. The eval runner reports kind/category/exact accuracy,
-errors, latency, and token usage when the provider exposes it.
+The normal test suite never calls Ollama. The classifier eval is a four-case structured-output
+compatibility smoke, not a statistically meaningful model-quality benchmark. It reports configured
+model availability, kind/category/exact accuracy, failure reasons, and latency. Signed amounts are
+part of every case. The runtime classifier only handles rows left unresolved by deterministic rules.
 
 ## Privacy, safety, and limitations
 

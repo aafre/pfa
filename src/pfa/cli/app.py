@@ -6,6 +6,7 @@ from datetime import date
 from pathlib import Path
 
 import typer
+from pydantic_ai import UsageLimits
 from rich.console import Console
 from rich.table import Table
 
@@ -206,7 +207,9 @@ def ask(question: str) -> None:
             return
         try:
             result = build_advisor(settings).run_sync(
-                question, deps=FinanceDependencies(services.analytics, services.planning)
+                question,
+                deps=FinanceDependencies(services.analytics, services.planning),
+                usage_limits=UsageLimits(request_limit=settings.agent_request_limit),
             )
             print_model_text(result.output)
         except Exception:

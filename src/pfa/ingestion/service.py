@@ -25,7 +25,7 @@ from .parsers.csv import read_csv_rows
 
 
 class Classifier(Protocol):
-    def classify(self, description: str, amount_minor: int) -> Classification | None: ...
+    def classify(self, description: str, signed_amount_minor: int) -> Classification | None: ...
 
 
 @dataclass(slots=True)
@@ -77,7 +77,7 @@ def _classification(
     if known:
         return known
     if classifier:
-        result = classifier.classify(row["description"], amount_minor)
+        result = classifier.classify(row["description"], sign * amount_minor)
         if result:
             return result
     return Classification(
