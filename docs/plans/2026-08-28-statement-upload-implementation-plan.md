@@ -46,55 +46,60 @@ New: `src/pfa/ingestion/candidates.py`. Pure data, no I/O, no library types.
 
 ```python
 @dataclass(frozen=True, slots=True)
-class StatementSource:          # the only thing an extractor receives
-    path: Path                  # staged temp file, generated name
+class StatementSource:  # the only thing an extractor receives
+    path: Path  # staged temp file, generated name
     original_filename: str
     media_type: str
     size_bytes: int
     sha256: str
 
+
 @dataclass(slots=True)
 class CandidateIssue:
-    code: str                   # "INVALID_DATE", "AMBIGUOUS_SIGN", "OCR_LOW_CONFIDENCE", ...
-    message: str                # user-facing, sanitized
-    severity: str               # "error" (blocking) | "warning"
+    code: str  # "INVALID_DATE", "AMBIGUOUS_SIGN", "OCR_LOW_CONFIDENCE", ...
+    message: str  # user-facing, sanitized
+    severity: str  # "error" (blocking) | "warning"
+
 
 @dataclass(slots=True)
 class CandidateTransaction:
-    candidate_id: str           # stable within batch, e.g. "c7"
+    candidate_id: str  # stable within batch, e.g. "c7"
     transaction_date: str | None
     posted_date: str | None
     raw_description: str
     normalized_description: str
-    amount_minor: int | None    # absolute magnitude, matches TransactionModel
-    direction: str | None       # "debit" | "credit"
+    amount_minor: int | None  # absolute magnitude, matches TransactionModel
+    direction: str | None  # "debit" | "credit"
     currency: str
     account_hint: str | None
     external_id: str | None
-    kind: str | None            # source-provided, optional
+    kind: str | None  # source-provided, optional
     category: str | None
     transfer_purpose: str | None
-    source_format: str          # "csv" | "pdf"
-    source_line: int | None     # CSV line number
-    source_page: int | None     # PDF page number
-    extraction_method: str      # "csv" | "pdf_text" | "ocr"
+    source_format: str  # "csv" | "pdf"
+    source_line: int | None  # CSV line number
+    source_page: int | None  # PDF page number
+    extraction_method: str  # "csv" | "pdf_text" | "ocr"
     raw_fields: dict[str, str]  # original extracted values, shown as provenance
     issues: list[CandidateIssue]
-    duplicate_of: int | None    # ledger transaction id
+    duplicate_of: int | None  # ledger transaction id
     included: bool = True
     # state property -> "error" | "warning" | "valid"
+
 
 @dataclass(slots=True)
 class ExtractionResult:
     candidates: list[CandidateTransaction]
-    extractor: str              # "csv/1", "pdfplumber/0.11.7"
+    extractor: str  # "csv/1", "pdfplumber/0.11.7"
     page_count: int | None
     detected_account: str | None
     detected_currency: str | None
-    issues: list[CandidateIssue]   # batch-level
+    issues: list[CandidateIssue]  # batch-level
+
 
 class StatementExtractor(Protocol):
     name: str
+
     def extract(self, source: StatementSource) -> ExtractionResult: ...
 ```
 
