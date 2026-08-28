@@ -76,15 +76,19 @@ class AnalyticsService:
         spending = sum(_spending(row) for row in rows)
         essential = sum(_spending(row) for row in rows if row.category in _ESSENTIAL)
         savings = sum(
-            row.amount_minor for row in rows if row.transfer_purpose == TransferPurpose.SAVING.value
+            row.amount_minor
+            for row in rows
+            if row.transfer_purpose == TransferPurpose.SAVING.value
+            and row.flow_direction == "debit"
         )
         investments = sum(
             row.amount_minor
             for row in rows
             if row.transfer_purpose == TransferPurpose.INVESTMENT.value
+            and row.flow_direction == "debit"
         )
         debt = sum(
-            row.amount_minor for row in rows if row.category == SpendingCategory.DEBT_PAYMENT.value
+            _spending(row) for row in rows if row.category == SpendingCategory.DEBT_PAYMENT.value
         )
         rate = round((savings + investments) / income * 100, 2) if income else 0.0
         return MonthlySummary(

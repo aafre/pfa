@@ -65,6 +65,7 @@ def upgrade() -> None:
         sa.Column("normalized_description", sa.String(length=500), nullable=False),
         sa.Column("merchant", sa.String(length=240), nullable=True),
         sa.Column("amount_minor", sa.Integer(), nullable=False),
+        sa.Column("flow_direction", sa.String(length=6), nullable=False),
         sa.Column("currency", sa.String(length=3), nullable=False),
         sa.Column("kind", sa.String(length=30), nullable=False),
         sa.Column("category", sa.String(length=40), nullable=True),

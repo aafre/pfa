@@ -180,6 +180,7 @@ The production package is under `src/pfa`:
 - local health reporting and graceful model unavailability
 
 Calculations define savings rate as `(saving transfers + investment transfers) / income` for the period.
+For paired owned-account transfers, only the debit/outgoing side contributes to that numerator.
 Spending includes classified expenses and fees, less refunds. Cash withdrawals affect cash position
 but are not spending until the underlying purchase is classified. Owned-account transfers do not
 count as income or spending.

@@ -58,6 +58,7 @@ def test_transfers_cash_withdrawals_income_and_month_boundaries(tmp_path) -> Non
     august = analytics.monthly_summary(date(2026, 8, 1))
     september = analytics.monthly_summary(date(2026, 9, 1))
     assert (august.income_minor, august.spending_minor, august.net_cashflow_minor) == (0, 0, 0)
+    assert august.savings_minor == 50_000
     assert september.spending_minor == 2_500
     uow.session.close()
     engine.dispose()

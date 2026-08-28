@@ -33,6 +33,7 @@ class TransactionModel(Base):
     normalized_description: Mapped[str] = mapped_column(String(500), index=True)
     merchant: Mapped[str | None] = mapped_column(String(240), nullable=True, index=True)
     amount_minor: Mapped[int] = mapped_column(Integer)
+    flow_direction: Mapped[str] = mapped_column(String(6), default="debit")
     currency: Mapped[str] = mapped_column(String(3), default="GBP")
     kind: Mapped[str] = mapped_column(String(30), default="unknown", index=True)
     category: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)

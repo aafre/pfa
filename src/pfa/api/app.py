@@ -30,6 +30,7 @@ class TransactionResponse(BaseModel):
     description: str
     merchant: str | None
     amount_minor: int
+    flow_direction: str
     currency: str
     kind: str
     category: str | None
@@ -108,6 +109,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     description=row.raw_description,
                     merchant=row.merchant,
                     amount_minor=row.amount_minor,
+                    flow_direction=row.flow_direction,
                     currency=row.currency,
                     kind=row.kind,
                     category=row.category,

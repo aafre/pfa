@@ -134,7 +134,7 @@ def transactions_list(limit: int = typer.Option(50, min=1, max=500)) -> None:
         for column in ("Date", "Description", "Amount", "Kind", "Category"):
             table.add_column(column)
         for row in services.uow.transactions.all()[-limit:]:
-            sign = "" if row.kind in {"income", "refund"} else "-"
+            sign = "-" if row.flow_direction == "debit" else ""
             table.add_row(
                 row.transaction_date.isoformat(),
                 row.raw_description,

@@ -21,6 +21,7 @@ def test_api_import_and_analytics_are_local_and_typed(tmp_path) -> None:
         assert response.status_code == 200
         assert response.json()["imported"] == 2
         summary = client.get("/analytics/monthly?month=2026-08")
-        assert summary.status_code == 200
-        assert summary.json()["income_minor"] == 100000
-        assert client.get("/transactions").json()[0]["amount_minor"] == 100000
+    assert summary.status_code == 200
+    assert summary.json()["income_minor"] == 100000
+    assert client.get("/transactions").json()[0]["amount_minor"] == 100000
+    assert client.get("/transactions").json()[0]["flow_direction"] == "credit"

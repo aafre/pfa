@@ -156,6 +156,7 @@ class ImportService:
                         normalized_description=normalized,
                         merchant=merchant_from_description(row["description"]),
                         amount_minor=amount_minor,
+                        flow_direction="debit" if sign < 0 else "credit",
                         currency=currency,
                         kind=classification.kind.value,
                         category=classification.category.value if classification.category else None,
