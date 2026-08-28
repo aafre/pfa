@@ -16,6 +16,7 @@ from pfa.ai.schemas import ChatRequest, ImportRequest
 from pfa.config import Settings, get_settings
 from pfa.ingestion.service import ImportService
 from pfa.observability import TimedOperation
+from pfa.services.answers import deterministic_answer
 from pfa.services.health import health_report
 from pfa.services.review import monthly_review_evidence
 from pfa.services.runtime import close_services, open_services
@@ -161,6 +162,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def chat(request: ChatRequest) -> dict[str, str]:
         engine, services = open_services(active_settings)
         try:
+            deterministic = deterministic_answer(
+                services.analytics, services.planning, request.message
+            )
+            if deterministic:
+                return {"answer": deterministic}
             try:
                 result = build_advisor(active_settings).run_sync(
                     request.message, deps=FinanceDependencies(services.analytics, services.planning)

@@ -17,6 +17,7 @@ from pfa.db.engine import init_db, make_engine
 from pfa.db.models import BudgetModel, GoalModel
 from pfa.domain.money import Money
 from pfa.ingestion.service import ImportService
+from pfa.services.answers import deterministic_answer
 from pfa.services.health import health_report
 from pfa.services.review import monthly_review_evidence
 from pfa.services.runtime import close_services, open_services
@@ -161,6 +162,10 @@ def ask(question: str) -> None:
     settings = get_settings()
     engine, services = open_services(settings)
     try:
+        deterministic = deterministic_answer(services.analytics, services.planning, question)
+        if deterministic:
+            print_model_text(deterministic)
+            return
         try:
             result = build_advisor(settings).run_sync(
                 question, deps=FinanceDependencies(services.analytics, services.planning)
