@@ -1,18 +1,21 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+from starlette.requests import Request
+from starlette.responses import Response
 
 from pfa.ai.agents.advisor import build_advisor
 from pfa.ai.deps import FinanceDependencies
 from pfa.ai.schemas import ChatRequest, ImportRequest
 from pfa.config import Settings, get_settings
 from pfa.ingestion.service import ImportService
+from pfa.observability import TimedOperation
 from pfa.services.health import health_report
 from pfa.services.review import monthly_review_evidence
 from pfa.services.runtime import close_services, open_services
@@ -57,6 +60,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         close_services(engine, services)
 
     app = FastAPI(title="PFA", version="0.1.0", lifespan=lifespan)
+
+    @app.middleware("http")
+    async def observe_request(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        with TimedOperation("http_request", method=request.method, path=request.url.path):
+            return await call_next(request)
 
     @app.get("/health")
     def health() -> dict[str, object]:

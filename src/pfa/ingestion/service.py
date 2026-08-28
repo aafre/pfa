@@ -16,6 +16,7 @@ from pfa.domain.transactions import (
     TransactionKind,
     TransferPurpose,
 )
+from pfa.observability import TimedOperation
 
 from .categorizer import Classification, classify_known
 from .fingerprint import transaction_fingerprint
@@ -94,58 +95,59 @@ class ImportService:
 
     def import_csv(self, path: Path, dry_run: bool = False) -> ImportResult:
         result = ImportResult()
-        for row in read_csv_rows(path):
-            try:
-                transaction_date = _parse_date(row["date"])
-                if not row["description"]:
-                    raise ImportRowError("missing description")
-                sign, amount_minor = _parse_amount(row["amount"])
-                normalized = normalize_description(row["description"])
-                fingerprint = transaction_fingerprint(
-                    row["account"],
-                    row["date"],
-                    amount_minor,
-                    row["currency"],
-                    normalized,
-                    row["external_id"] or None,
-                )
-                if self.uow.transactions.find_fingerprint(fingerprint):
-                    result.duplicates += 1
-                    continue
-                classification = _classification(row, sign, amount_minor, self.classifier)
-                account = self.uow.accounts.get_or_create(row["account"], row["currency"])
-                transaction = TransactionModel(
-                    external_id=row["external_id"] or None,
-                    account_id=account.id,
-                    transaction_date=transaction_date,
-                    posted_date=_parse_date(row["posted_date"]) if row["posted_date"] else None,
-                    raw_description=row["description"],
-                    normalized_description=normalized,
-                    merchant=merchant_from_description(row["description"]),
-                    amount_minor=amount_minor,
-                    currency=row["currency"].upper(),
-                    kind=classification.kind.value,
-                    category=classification.category.value if classification.category else None,
-                    transfer_purpose=classification.transfer_purpose.value
-                    if classification.transfer_purpose
-                    else None,
-                    classification_source=str(classification.source),
-                    classification_confidence=classification.confidence,
-                    classification_reason=classification.reason,
-                    import_source=str(path),
-                    fingerprint=fingerprint,
-                )
-                if not dry_run:
-                    self.uow.transactions.add(transaction)
-                result.imported += 1
-                if (
-                    classification.kind == TransactionKind.UNKNOWN
-                    or classification.category is None
-                    and classification.kind == TransactionKind.EXPENSE
-                ):
-                    result.requires_classification += 1
-            except (ImportRowError, ValueError) as exc:
-                result.errors.append(f"row {row.get('_line', '?')}: {exc}")
+        with TimedOperation("import_csv", source=path.name, dry_run=dry_run):
+            for row in read_csv_rows(path):
+                try:
+                    transaction_date = _parse_date(row["date"])
+                    if not row["description"]:
+                        raise ImportRowError("missing description")
+                    sign, amount_minor = _parse_amount(row["amount"])
+                    normalized = normalize_description(row["description"])
+                    fingerprint = transaction_fingerprint(
+                        row["account"],
+                        row["date"],
+                        amount_minor,
+                        row["currency"],
+                        normalized,
+                        row["external_id"] or None,
+                    )
+                    if self.uow.transactions.find_fingerprint(fingerprint):
+                        result.duplicates += 1
+                        continue
+                    classification = _classification(row, sign, amount_minor, self.classifier)
+                    account = self.uow.accounts.get_or_create(row["account"], row["currency"])
+                    transaction = TransactionModel(
+                        external_id=row["external_id"] or None,
+                        account_id=account.id,
+                        transaction_date=transaction_date,
+                        posted_date=_parse_date(row["posted_date"]) if row["posted_date"] else None,
+                        raw_description=row["description"],
+                        normalized_description=normalized,
+                        merchant=merchant_from_description(row["description"]),
+                        amount_minor=amount_minor,
+                        currency=row["currency"].upper(),
+                        kind=classification.kind.value,
+                        category=classification.category.value if classification.category else None,
+                        transfer_purpose=classification.transfer_purpose.value
+                        if classification.transfer_purpose
+                        else None,
+                        classification_source=str(classification.source),
+                        classification_confidence=classification.confidence,
+                        classification_reason=classification.reason,
+                        import_source=str(path),
+                        fingerprint=fingerprint,
+                    )
+                    if not dry_run:
+                        self.uow.transactions.add(transaction)
+                    result.imported += 1
+                    if (
+                        classification.kind == TransactionKind.UNKNOWN
+                        or classification.category is None
+                        and classification.kind == TransactionKind.EXPENSE
+                    ):
+                        result.requires_classification += 1
+                except (ImportRowError, ValueError) as exc:
+                    result.errors.append(f"row {row.get('_line', '?')}: {exc}")
         if dry_run:
             self.uow.session.rollback()
         return result

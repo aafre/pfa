@@ -18,14 +18,17 @@ def health_report(settings: Settings, database_url: str | None = None) -> dict[s
     except Exception:
         database = "unhealthy"
     ollama = "healthy"
+    model = "missing"
     try:
         response = httpx.get(f"{settings.ollama_base_url.rstrip('/')}/api/tags", timeout=2)
         response.raise_for_status()
+        names = {str(item.get("name")) for item in response.json().get("models", [])}
+        model = "available" if settings.model in names else "missing"
     except Exception:
         ollama = "unavailable"
     status = (
         "healthy"
-        if database == "healthy" and ollama == "healthy"
+        if database == "healthy" and ollama == "healthy" and model == "available"
         else "degraded"
         if database == "healthy"
         else "unhealthy"
@@ -35,6 +38,7 @@ def health_report(settings: Settings, database_url: str | None = None) -> dict[s
         "application": "healthy",
         "database": database,
         "ollama": ollama,
+        "model": model,
         "configured_model": settings.model,
         "database_url": database_url or settings.database_url,
     }

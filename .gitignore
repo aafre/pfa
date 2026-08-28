@@ -48,6 +48,11 @@ coverage.xml
 *.cover
 *.py.cover
 .hypothesis/
+.pytest-local/
+.uv-cache/
+data/*.db
+data/*.db-*
+.env
 .pytest_cache/
 cover/
 

@@ -6,6 +6,7 @@ from pfa.ai.models import local_model
 from pfa.ai.schemas import TransactionClassification
 from pfa.config import Settings
 from pfa.ingestion.categorizer import Classification
+from pfa.observability import TimedOperation
 
 
 class LocalTransactionClassifier:
@@ -25,9 +26,10 @@ class LocalTransactionClassifier:
 
     def classify(self, description: str, amount_minor: int) -> Classification | None:
         try:
-            result = self.agent.run_sync(
-                f"Description: {description}\nAmount in minor units: {amount_minor}"
-            ).output
+            with TimedOperation("classifier_inference", model=self.settings.model):
+                result = self.agent.run_sync(
+                    f"Description: {description}\nAmount in minor units: {amount_minor}"
+                ).output
         except Exception:
             return None
         if result.kind.value == "unknown":

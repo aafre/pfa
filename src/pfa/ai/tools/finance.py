@@ -45,6 +45,13 @@ def get_recurring_payments(ctx: RunContext[FinanceDependencies]) -> list[dict[st
     return ctx.deps.analytics.recurring_payments()
 
 
+def get_spending_trend(
+    ctx: RunContext[FinanceDependencies], category: str, period: str, months: int = 6
+) -> list[dict[str, int | str]]:
+    """Return deterministic monthly category totals for a requested baseline window."""
+    return ctx.deps.analytics.category_trend(category, parse_month(period), months)
+
+
 def get_budget_status(ctx: RunContext[FinanceDependencies], period: str) -> list[dict[str, object]]:
     """Return deterministic budget actuals and remaining amounts for YYYY-MM."""
     return [item.model_dump() for item in ctx.deps.analytics.budget_status(parse_month(period))]

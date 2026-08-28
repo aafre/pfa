@@ -9,6 +9,7 @@ from pfa.db.repositories import BudgetRepository, GoalRepository, TransactionRep
 from pfa.domain.accounts import NON_CASH_ACCOUNT_TYPES
 from pfa.domain.transactions import SpendingCategory, TransactionKind, TransferPurpose
 
+from .anomalies import category_spikes, unusual_transactions
 from .recurring import detect_recurring
 from .results import (
     BudgetStatus,
@@ -18,6 +19,7 @@ from .results import (
     MonthlySummary,
     PeriodComparison,
 )
+from .trends import category_trend
 
 _ESSENTIAL = {
     SpendingCategory.HOUSING.value,
@@ -197,6 +199,20 @@ class AnalyticsService:
             "spending_minor": summary.spending_minor,
             "net_cashflow_minor": summary.net_cashflow_minor,
         }
+
+    def unusual_transactions(self, period: date) -> list[dict[str, object]]:
+        return unusual_transactions(self.transactions.all(), period)
+
+    def category_spikes(
+        self, current: date, previous: date | None = None
+    ) -> list[dict[str, object]]:
+        previous = previous or (current.replace(day=1) - timedelta(days=1))
+        return category_spikes(self.transactions.all(), current, previous)
+
+    def category_trend(
+        self, category: str, as_of: date, months: int = 6
+    ) -> list[dict[str, int | str]]:
+        return category_trend(self.transactions.all(), category, as_of, months)
 
 
 def current_cash(accounts: list[AccountModel], transactions: list[TransactionModel]) -> int:

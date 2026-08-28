@@ -1,0 +1,4 @@
+{"description":"TESCO groceries","kind":"expense","category":"groceries"}
+{"description":"monthly salary payroll","kind":"income","category":null}
+{"description":"Netflix subscription","kind":"expense","category":"subscriptions"}
+{"description":"savings transfer","kind":"transfer","category":null}

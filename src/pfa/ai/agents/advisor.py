@@ -12,6 +12,7 @@ from pfa.ai.tools.finance import (
     get_merchant_spending,
     get_monthly_summary,
     get_recurring_payments,
+    get_spending_trend,
     simulate_monthly_contribution,
     simulate_purchase,
 )
@@ -39,6 +40,7 @@ def build_advisor(settings: Settings) -> Agent[FinanceDependencies, str]:
             get_merchant_spending,
             compare_periods,
             get_recurring_payments,
+            get_spending_trend,
             get_budget_status,
             get_goal_progress,
             simulate_purchase,

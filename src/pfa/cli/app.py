@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -12,6 +15,8 @@ from pfa.ai.agents.categorizer import LocalTransactionClassifier
 from pfa.ai.deps import FinanceDependencies
 from pfa.config import get_settings
 from pfa.db.engine import init_db, make_engine
+from pfa.db.models import BudgetModel, GoalModel
+from pfa.domain.money import Money
 from pfa.ingestion.service import ImportService
 from pfa.services.health import health_report
 from pfa.services.review import monthly_review_evidence
@@ -146,10 +151,16 @@ def ask(question: str) -> None:
     settings = get_settings()
     engine, services = open_services(settings)
     try:
-        result = build_advisor(settings).run_sync(
-            question, deps=FinanceDependencies(services.analytics, services.planning)
-        )
-        console.print(result.output)
+        try:
+            result = build_advisor(settings).run_sync(
+                question, deps=FinanceDependencies(services.analytics, services.planning)
+            )
+            console.print(result.output)
+        except Exception:
+            console.print(
+                "[yellow]Local model unavailable. Use summary/review commands "
+                "for deterministic evidence.[/yellow]"
+            )
     finally:
         close_services(engine, services)
 
@@ -159,7 +170,20 @@ def review_month(month: str | None = typer.Option(None, "--month")) -> None:
     engine, services = open_services(get_settings())
     try:
         evidence = monthly_review_evidence(services.analytics, parse_month(month))
-        console.print_json(data=evidence)
+        try:
+            prompt = (
+                "Write a concise monthly review from this authoritative JSON. "
+                "Do not recalculate or invent facts. Label assumptions.\n" + json.dumps(evidence)
+            )
+            result = build_advisor(get_settings()).run_sync(
+                prompt, deps=FinanceDependencies(services.analytics, services.planning)
+            )
+            console.print(result.output)
+        except Exception:
+            console.print(
+                "[yellow]Local model unavailable; showing deterministic review evidence.[/yellow]"
+            )
+            console.print_json(data=evidence)
     finally:
         close_services(engine, services)
 
@@ -172,6 +196,30 @@ def budget_show(month: str | None = typer.Option(None, "--month")) -> None:
             console.print(status.model_dump_json())
     finally:
         close_services(engine, services)
+
+
+@budget_app.command("set")
+def budget_set(
+    amount: str,
+    category: str | None = typer.Option(None, "--category"),
+    month: str | None = typer.Option(None, "--month"),
+    discretionary: bool = typer.Option(False, "--discretionary"),
+) -> None:
+    engine, services = open_services(get_settings())
+    try:
+        services.uow.budgets.add(
+            BudgetModel(
+                amount_minor=Money.from_major(amount).minor,
+                category=category,
+                effective_from=parse_month(month),
+                discretionary=discretionary,
+            )
+        )
+        close_services(engine, services)
+        console.print("Budget saved")
+    except Exception:
+        close_services(engine, services, False)
+        raise
 
 
 @goals_app.command("list")
@@ -187,9 +235,34 @@ def goals_list() -> None:
         close_services(engine, services)
 
 
+@goals_app.command("add")
+def goals_add(
+    name: str, target: str, goal_type: str = typer.Option("savings_target", "--type")
+) -> None:
+    engine, services = open_services(get_settings())
+    try:
+        services.uow.goals.add(
+            GoalModel(name=name, goal_type=goal_type, target_minor=Money.from_major(target).minor)
+        )
+        close_services(engine, services)
+        console.print("Goal saved")
+    except Exception:
+        close_services(engine, services, False)
+        raise
+
+
 @app.command("health")
 def health() -> None:
     console.print_json(data=health_report(get_settings()))
+
+
+@app.command("eval-classifier")
+def eval_classifier() -> None:
+    """Run the separate real-model classifier evaluation."""
+    script = Path(__file__).resolve().parents[3] / "evals" / "classifier.py"
+    result = subprocess.run([sys.executable, str(script)], check=False)
+    if result.returncode:
+        raise typer.Exit(result.returncode)
 
 
 if __name__ == "__main__":

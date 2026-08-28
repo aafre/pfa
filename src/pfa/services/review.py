@@ -14,4 +14,6 @@ def monthly_review_evidence(analytics: AnalyticsService, period: date) -> dict[s
         "recurring_payments": analytics.recurring_payments(),
         "budget_status": [item.model_dump() for item in analytics.budget_status(period)],
         "goal_progress": [item.model_dump() for item in analytics.goal_progress()],
+        "category_spikes": analytics.category_spikes(period),
+        "unusual_transactions": analytics.unusual_transactions(period),
     }
