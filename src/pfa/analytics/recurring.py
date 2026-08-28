@@ -4,13 +4,24 @@ from collections import defaultdict
 from statistics import median
 
 from pfa.db.models import TransactionModel
-from pfa.domain.transactions import TransactionKind
+from pfa.domain.transactions import SpendingCategory, TransactionKind
+
+_RECURRING_CATEGORIES = {
+    SpendingCategory.HOUSING.value,
+    SpendingCategory.UTILITIES.value,
+    SpendingCategory.SUBSCRIPTIONS.value,
+    SpendingCategory.INSURANCE.value,
+    SpendingCategory.DEBT_PAYMENT.value,
+    SpendingCategory.FEES.value,
+}
 
 
 def detect_recurring(transactions: list[TransactionModel]) -> list[dict[str, object]]:
     groups: dict[str, list[TransactionModel]] = defaultdict(list)
     for transaction in transactions:
-        if transaction.kind in {TransactionKind.EXPENSE.value, TransactionKind.FEE.value}:
+        if transaction.kind in {TransactionKind.EXPENSE.value, TransactionKind.FEE.value} and (
+            transaction.category is None or transaction.category in _RECURRING_CATEGORIES
+        ):
             groups[transaction.merchant or transaction.normalized_description].append(transaction)
     found: list[dict[str, object]] = []
     for merchant, observations in groups.items():
@@ -33,14 +44,18 @@ def detect_recurring(transactions: list[TransactionModel]) -> list[dict[str, obj
         amounts = [item.amount_minor for item in observations]
         average = sum(amounts) / len(amounts)
         similar = sum(abs(amount - average) / max(average, 1) <= 0.15 for amount in amounts)
-        if similar / len(amounts) < 0.67:
+        similarity_ratio = similar / len(amounts)
+        if similarity_ratio < 0.67:
             continue
         found.append(
             {
                 "merchant": merchant,
                 "likely_recurring": True,
+                "confidence": "high" if len(observations) >= 4 else "moderate",
                 "cadence": cadence,
                 "observations": len(observations),
+                "median_gap_days": typical_gap,
+                "amount_similarity_ratio": round(similarity_ratio, 2),
                 "average_amount_minor": round(average),
                 "last_seen": max(item.transaction_date for item in observations).isoformat(),
             }

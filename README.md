@@ -255,8 +255,9 @@ binding and has no authentication platform. PFA is advisory and read-only: it ca
 money, execute trades, initiate payments, alter bank accounts, or promise investment returns.
 
 Current limitations include bank-specific CSV quirks, manual handling of opening balances, and
-heuristic recurring/anomaly detection. Future work: richer import adapters, explicit correction
-commands, a local review UI, stronger evals for groundedness, and opt-in audit logs for any future
+heuristic recurring/anomaly detection. Recurring evidence supports weekly, monthly, and quarterly
+cadences; annual schedules and missing-month recovery are not inferred. Future work: richer import
+adapters, a local review UI, stronger evals for groundedness, and opt-in audit logs for any future
 write proposal flow.
 
 See [docs/architecture.md](docs/architecture.md) and [docs/ai-engineering.md](docs/ai-engineering.md)
