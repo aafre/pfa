@@ -106,6 +106,7 @@ class ImportService:
 
     def import_csv(self, path: Path, dry_run: bool = False) -> ImportResult:
         result = ImportResult()
+        occurrences: dict[tuple[str, str, int, str, str], int] = {}
         with TimedOperation("import_csv", source=path.name, dry_run=dry_run):
             for row in read_csv_rows(path):
                 try:
@@ -114,13 +115,27 @@ class ImportService:
                         raise ImportRowError("missing description")
                     sign, amount_minor = _parse_amount(row["amount"])
                     normalized = normalize_description(row["description"])
+                    currency = row["currency"].upper()
+                    if currency != "GBP":
+                        raise ImportRowError(
+                            f"unsupported currency {currency!r}; PFA v0.1 supports GBP only"
+                        )
+                    occurrence_key = (
+                        row["account"],
+                        row["date"],
+                        sign * amount_minor,
+                        currency,
+                        normalized,
+                    )
+                    occurrences[occurrence_key] = occurrences.get(occurrence_key, 0) + 1
                     fingerprint = transaction_fingerprint(
                         row["account"],
                         row["date"],
-                        amount_minor,
-                        row["currency"],
+                        sign * amount_minor,
+                        currency,
                         normalized,
                         row["external_id"] or None,
+                        1 if row["external_id"] else occurrences[occurrence_key],
                     )
                     if self.uow.transactions.find_fingerprint(fingerprint):
                         result.duplicates += 1
@@ -131,7 +146,7 @@ class ImportService:
                         if rule
                         else _classification(row, sign, amount_minor, self.classifier)
                     )
-                    account = self.uow.accounts.get_or_create(row["account"], row["currency"])
+                    account = self.uow.accounts.get_or_create(row["account"], currency)
                     transaction = TransactionModel(
                         external_id=row["external_id"] or None,
                         account_id=account.id,
@@ -141,7 +156,7 @@ class ImportService:
                         normalized_description=normalized,
                         merchant=merchant_from_description(row["description"]),
                         amount_minor=amount_minor,
-                        currency=row["currency"].upper(),
+                        currency=currency,
                         kind=classification.kind.value,
                         category=classification.category.value if classification.category else None,
                         transfer_purpose=classification.transfer_purpose.value
