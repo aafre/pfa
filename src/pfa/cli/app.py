@@ -14,7 +14,6 @@ from pfa.ai.agents.advisor import build_advisor
 from pfa.ai.agents.categorizer import LocalTransactionClassifier
 from pfa.ai.deps import FinanceDependencies
 from pfa.config import get_settings
-from pfa.db.engine import init_db, make_engine
 from pfa.db.models import BudgetModel, GoalModel, MerchantRuleModel, TransactionModel
 from pfa.domain.money import Money
 from pfa.domain.transactions import ClassificationSource, SpendingCategory
@@ -66,11 +65,8 @@ def print_money(minor: int) -> str:
 
 @db_app.command("init")
 def db_init() -> None:
-    settings = get_settings()
-    engine = make_engine(settings)
-    init_db(engine)
-    engine.dispose()
-    console.print(f"Database ready: {settings.database_url}")
+    """Backward-compatible alias for the authoritative migration path."""
+    db_migrate()
 
 
 @db_app.command("migrate")
