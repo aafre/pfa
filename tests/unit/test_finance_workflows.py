@@ -52,6 +52,7 @@ def test_unknown_expense_is_reported_for_review(tmp_path) -> None:
     result = ImportService(UnitOfWork(session)).import_csv(path)
     assert result.imported == 1
     assert result.requires_classification == 1
+    assert len(UnitOfWork(session).transactions.uncategorized()) == 1
     assert (
         session.query(__import__("pfa.db.models", fromlist=["TransactionModel"]).TransactionModel)
         .one()

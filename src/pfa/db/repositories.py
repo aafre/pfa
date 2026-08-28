@@ -47,7 +47,9 @@ class TransactionRepository:
             self.session.scalars(
                 select(TransactionModel).where(
                     TransactionModel.category.is_(None),
-                    TransactionModel.kind == TransactionKind.UNKNOWN.value,
+                    TransactionModel.kind.in_(
+                        [TransactionKind.EXPENSE.value, TransactionKind.UNKNOWN.value]
+                    ),
                 )
             )
         )
