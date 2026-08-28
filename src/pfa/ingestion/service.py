@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from itertools import chain
+from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
@@ -19,10 +20,25 @@ from pfa.domain.transactions import (
 )
 from pfa.observability import TimedOperation
 
+from .candidates import (
+    DUPLICATE_ROW,
+    ERROR,
+    INVALID_AMOUNT,
+    INVALID_DATE,
+    MISSING_DESCRIPTION,
+    UNKNOWN_CATEGORY,
+    UNKNOWN_KIND,
+    UNKNOWN_TRANSFER_PURPOSE,
+    UNSUPPORTED_CURRENCY,
+    WARNING,
+    CandidateTransaction,
+    ExtractionResult,
+    StatementSource,
+)
 from .categorizer import Classification, classify_known
+from .extractors.csv import CsvStatementExtractor
 from .fingerprint import transaction_fingerprint
 from .normalizer import merchant_from_description, normalize_description
-from .parsers.csv import read_csv_rows
 
 
 class Classifier(Protocol):
@@ -55,30 +71,34 @@ def _parse_amount(value: str) -> tuple[int, int]:
     return sign, Money.from_major(abs(decimal)).minor
 
 
+def _non_member(value: str, enum: type[StrEnum]) -> str | None:
+    """Returns the ValueError message when value is not a member of enum."""
+    try:
+        enum(value)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
 def _classification(
-    row: dict[str, str], sign: int, amount_minor: int, classifier: Classifier | None
+    candidate: CandidateTransaction, sign: int, classifier: Classifier | None
 ) -> Classification:
-    explicit_kind = row["kind"].lower()
-    if explicit_kind:
-        try:
-            kind = TransactionKind(explicit_kind)
-        except ValueError as exc:
-            raise ImportRowError(f"unknown transaction kind {explicit_kind!r}") from exc
-        category = SpendingCategory(row["category"]) if row["category"] else None
-        purpose = TransferPurpose(row["transfer_purpose"]) if row["transfer_purpose"] else None
+    if candidate.kind:
         return Classification(
-            kind,
-            category,
-            purpose,
+            TransactionKind(candidate.kind.lower()),
+            SpendingCategory(candidate.category) if candidate.category else None,
+            TransferPurpose(candidate.transfer_purpose) if candidate.transfer_purpose else None,
             ClassificationSource.IMPORT,
             None,
             "source-provided classification",
         )
-    known = classify_known(row["description"])
+    known = classify_known(candidate.raw_description)
     if known:
         return known
     if classifier:
-        result = classifier.classify(row["description"], sign * amount_minor)
+        result = classifier.classify(
+            candidate.raw_description, sign * (candidate.amount_minor or 0)
+        )
         if result:
             return result
     return Classification(
@@ -100,95 +120,178 @@ def _classification_from_rule(rule: MerchantRuleModel) -> Classification:
     )
 
 
+def _validate_candidate(candidate: CandidateTransaction) -> None:
+    try:
+        _parse_date(candidate.transaction_date or "")
+    except ImportRowError as exc:
+        candidate.add_issue(INVALID_DATE, str(exc))
+        return
+    if not candidate.raw_description:
+        candidate.add_issue(MISSING_DESCRIPTION, "missing description")
+        return
+    if candidate.amount_minor is None:
+        try:
+            sign, amount_minor = _parse_amount(candidate.raw_fields.get("amount", ""))
+        except ImportRowError as exc:
+            candidate.add_issue(INVALID_AMOUNT, str(exc))
+            return
+        candidate.amount_minor = amount_minor
+        candidate.direction = "debit" if sign < 0 else "credit"
+    candidate.normalized_description = normalize_description(candidate.raw_description)
+    if candidate.currency != "GBP":
+        candidate.add_issue(
+            UNSUPPORTED_CURRENCY,
+            f"unsupported currency {candidate.currency!r}; PFA v0.1 supports GBP only",
+        )
+        return
+    if candidate.posted_date:
+        try:
+            _parse_date(candidate.posted_date)
+        except ImportRowError as exc:
+            candidate.add_issue(INVALID_DATE, str(exc))
+            return
+    if candidate.kind and _non_member(candidate.kind.lower(), TransactionKind):
+        candidate.add_issue(UNKNOWN_KIND, f"unknown transaction kind {candidate.kind.lower()!r}")
+        return
+    for value, enum, code in (
+        (candidate.category, SpendingCategory, UNKNOWN_CATEGORY),
+        (candidate.transfer_purpose, TransferPurpose, UNKNOWN_TRANSFER_PURPOSE),
+    ):
+        message = _non_member(value, enum) if value else None
+        if message:
+            candidate.add_issue(code, message)
+            return
+
+
 class ImportService:
     def __init__(self, unit_of_work: UnitOfWork, classifier: Classifier | None = None):
         self.uow = unit_of_work
         self.classifier = classifier
 
-    def import_csv(self, path: Path, dry_run: bool = False) -> ImportResult:
-        result = ImportResult()
+    def validate(self, candidates: Sequence[CandidateTransaction]) -> None:
+        """Attaches issues, never raises. A row stops at its first blocking problem."""
+        for candidate in candidates:
+            if candidate.state != ERROR:
+                _validate_candidate(candidate)
+
+    def resolve_duplicates(self, candidates: Sequence[CandidateTransaction]) -> None:
+        """Fingerprints valid rows, occurrence-aware, and matches them against the ledger."""
         occurrences: dict[tuple[str, str, int, str, str], int] = {}
-        rows = read_csv_rows(path)
-        try:
-            first_row = next(rows)
-        except StopIteration:
-            return result
-        except ImportRowError as exc:
-            result.errors.append(str(exc))
-            return result
-        with TimedOperation("import_csv", source=path.name, dry_run=dry_run):
-            for row in chain((first_row,), rows):
-                try:
-                    transaction_date = _parse_date(row["date"])
-                    if not row["description"]:
-                        raise ImportRowError("missing description")
-                    sign, amount_minor = _parse_amount(row["amount"])
-                    normalized = normalize_description(row["description"])
-                    currency = row["currency"].upper()
-                    if currency != "GBP":
-                        raise ImportRowError(
-                            f"unsupported currency {currency!r}; PFA v0.1 supports GBP only"
-                        )
-                    occurrence_key = (
-                        row["account"],
-                        row["date"],
-                        sign * amount_minor,
-                        currency,
-                        normalized,
-                    )
-                    occurrences[occurrence_key] = occurrences.get(occurrence_key, 0) + 1
-                    fingerprint = transaction_fingerprint(
-                        row["account"],
-                        row["date"],
-                        sign * amount_minor,
-                        currency,
-                        normalized,
-                        row["external_id"] or None,
-                        1 if row["external_id"] else occurrences[occurrence_key],
-                    )
-                    if self.uow.transactions.find_fingerprint(fingerprint):
-                        result.duplicates += 1
-                        continue
-                    rule = self.uow.rules.match(normalized)
-                    classification = (
-                        _classification_from_rule(rule)
-                        if rule
-                        else _classification(row, sign, amount_minor, self.classifier)
-                    )
-                    account = self.uow.accounts.get_or_create(row["account"], currency)
-                    transaction = TransactionModel(
-                        external_id=row["external_id"] or None,
-                        account_id=account.id,
-                        transaction_date=transaction_date,
-                        posted_date=_parse_date(row["posted_date"]) if row["posted_date"] else None,
-                        raw_description=row["description"],
-                        normalized_description=normalized,
-                        merchant=merchant_from_description(row["description"]),
-                        amount_minor=amount_minor,
-                        flow_direction="debit" if sign < 0 else "credit",
-                        currency=currency,
-                        kind=classification.kind.value,
-                        category=classification.category.value if classification.category else None,
-                        transfer_purpose=classification.transfer_purpose.value
-                        if classification.transfer_purpose
-                        else None,
-                        classification_source=str(classification.source),
-                        classification_confidence=classification.confidence,
-                        classification_reason=classification.reason,
-                        import_source=str(path),
-                        fingerprint=fingerprint,
-                    )
-                    if not dry_run:
-                        self.uow.transactions.add(transaction)
-                    result.imported += 1
-                    if (
-                        classification.kind == TransactionKind.UNKNOWN
-                        or classification.category is None
-                        and classification.kind == TransactionKind.EXPENSE
-                    ):
-                        result.requires_classification += 1
-                except (ImportRowError, ValueError) as exc:
-                    result.errors.append(f"row {row.get('_line', '?')}: {exc}")
+        for candidate in candidates:
+            candidate.issues = [i for i in candidate.issues if i.code != DUPLICATE_ROW]
+            signed = candidate.signed_amount_minor
+            if candidate.state == ERROR or signed is None:
+                continue
+            key = (
+                candidate.account_hint or "Main account",
+                candidate.transaction_date or "",
+                signed,
+                candidate.currency,
+                candidate.normalized_description,
+            )
+            occurrences[key] = occurrences.get(key, 0) + 1
+            candidate.fingerprint = transaction_fingerprint(
+                *key,
+                candidate.external_id,
+                1 if candidate.external_id else occurrences[key],
+            )
+            existing = self.uow.transactions.find_fingerprint(candidate.fingerprint)
+            candidate.duplicate_of = existing.id if existing else None
+            if existing:
+                candidate.add_issue(
+                    DUPLICATE_ROW, "already in the ledger; it will not be imported", WARNING
+                )
+
+    def commit(
+        self,
+        candidates: Sequence[CandidateTransaction],
+        *,
+        source_label: str,
+        dry_run: bool = False,
+    ) -> list[TransactionModel]:
+        """Persists included, non-duplicate, non-error rows."""
+        committed: list[TransactionModel] = []
+        for candidate in candidates:
+            if not candidate.included or candidate.state == ERROR:
+                continue
+            if candidate.duplicate_of is not None or candidate.amount_minor is None:
+                continue
+            sign = -1 if candidate.direction == "debit" else 1
+            rule = self.uow.rules.match(candidate.normalized_description)
+            classification = (
+                _classification_from_rule(rule)
+                if rule
+                else _classification(candidate, sign, self.classifier)
+            )
+            account = self.uow.accounts.get_or_create(
+                candidate.account_hint or "Main account", candidate.currency
+            )
+            transaction = TransactionModel(
+                external_id=candidate.external_id,
+                account_id=account.id,
+                transaction_date=_parse_date(candidate.transaction_date or ""),
+                posted_date=_parse_date(candidate.posted_date) if candidate.posted_date else None,
+                raw_description=candidate.raw_description,
+                normalized_description=candidate.normalized_description,
+                merchant=merchant_from_description(candidate.raw_description),
+                amount_minor=candidate.amount_minor,
+                flow_direction="debit" if sign < 0 else "credit",
+                currency=candidate.currency,
+                kind=classification.kind.value,
+                category=classification.category.value if classification.category else None,
+                transfer_purpose=classification.transfer_purpose.value
+                if classification.transfer_purpose
+                else None,
+                classification_source=str(classification.source),
+                classification_confidence=classification.confidence,
+                classification_reason=classification.reason,
+                import_source=source_label,
+                fingerprint=candidate.fingerprint or "",
+            )
+            if not dry_run:
+                self.uow.transactions.add(transaction)
+            committed.append(transaction)
+        return committed
+
+    def import_result(
+        self,
+        extraction: ExtractionResult,
+        *,
+        source_label: str,
+        account_override: str | None = None,
+        dry_run: bool = False,
+    ) -> ImportResult:
+        candidates = extraction.candidates
+        if account_override:
+            for candidate in candidates:
+                candidate.account_hint = account_override
+        with TimedOperation("import_result", extractor=extraction.extractor, dry_run=dry_run):
+            self.validate(candidates)
+            self.resolve_duplicates(candidates)
+            committed = self.commit(candidates, source_label=source_label, dry_run=dry_run)
         if dry_run:
             self.uow.session.rollback()
-        return result
+        return ImportResult(
+            imported=len(committed),
+            duplicates=sum(1 for candidate in candidates if candidate.duplicate_of is not None),
+            requires_classification=sum(
+                1
+                for transaction in committed
+                if transaction.kind == TransactionKind.UNKNOWN.value
+                or (
+                    transaction.category is None
+                    and transaction.kind == TransactionKind.EXPENSE.value
+                )
+            ),
+            errors=[issue.message for issue in extraction.issues if issue.severity == ERROR]
+            + [
+                f"row {candidate.source_line or '?'}: {error.message}"
+                for candidate in candidates
+                if (error := candidate.first_error())
+            ],
+        )
+
+    def import_csv(self, path: Path, dry_run: bool = False) -> ImportResult:
+        source = StatementSource(path=path, original_filename=path.name, media_type="text/csv")
+        extraction = CsvStatementExtractor().extract(source)
+        return self.import_result(extraction, source_label=str(path), dry_run=dry_run)
