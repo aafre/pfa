@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     agent_request_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
     agent_request_limit: int = Field(default=8, ge=1, le=20)
     agent_output_token_limit: int = Field(default=1024, ge=128, le=4096)
+    max_pdf_pages: int = Field(default=100, ge=1, le=1000)
 
 
 @lru_cache
