@@ -16,6 +16,7 @@ def test_import_is_idempotent_and_transfers_do_not_count_as_spending(tmp_path) -
         "2026-08-03,Savings transfer,-500,transfer,,saving,Main\n"
         "2026-08-04,Investment transfer,-300,transfer,,investment,Main\n"
         "2026-08-05,Refund,50,refund,,,Main\n"
+        "2026-08-06,ATM cash withdrawal,-20,cash_withdrawal,,,Main\n"
     )
     engine = make_engine(
         __import__("pfa.config", fromlist=["Settings"]).Settings(database_url="sqlite:///:memory:")
@@ -29,8 +30,8 @@ def test_import_is_idempotent_and_transfers_do_not_count_as_spending(tmp_path) -
     second = importer.import_csv(path)
     service = AnalyticsService(uow.transactions, uow.budgets, uow.goals)
     summary = service.monthly_summary(date(2026, 8, 1))
-    assert (first.imported, first.duplicates) == (5, 0)
-    assert (second.imported, second.duplicates) == (0, 5)
+    assert (first.imported, first.duplicates) == (6, 0)
+    assert (second.imported, second.duplicates) == (0, 6)
     assert summary.income_minor == 300000
     assert summary.spending_minor == 95000
     assert summary.savings_minor == 50000

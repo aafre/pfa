@@ -7,7 +7,7 @@ from pfa.db.models import TransactionModel
 
 
 def _spending(row: TransactionModel) -> int:
-    if row.kind in {"expense", "fee", "cash_withdrawal"}:
+    if row.kind in {"expense", "fee"}:
         return row.amount_minor
     return -row.amount_minor if row.kind == "refund" else 0
 

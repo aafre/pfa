@@ -35,7 +35,6 @@ _ESSENTIAL = {
 _SPENDING_KINDS = {
     TransactionKind.EXPENSE.value,
     TransactionKind.FEE.value,
-    TransactionKind.CASH_WITHDRAWAL.value,
 }
 
 

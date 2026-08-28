@@ -6,7 +6,7 @@ from datetime import date
 
 from pfa.db.models import TransactionModel
 
-_SPENDING = {"expense", "fee", "cash_withdrawal"}
+_SPENDING = {"expense", "fee"}
 
 
 def _bounds(period: date) -> tuple[date, date]:
