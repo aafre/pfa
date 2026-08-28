@@ -36,6 +36,9 @@ PFA tools call `AnalyticsService` and `PlanningService`; the model never gets ar
 Money-bearing tool results include integer `*_minor` fields plus deterministic `*_display` GBP
 strings. An output validator rejects currency or percentage claims when the run has no tool result.
 This is harness enforcement, not reliance on prompt obedience.
+The validator proves tool-use presence, not semantic entailment of every sentence. Common numerical
+intents bypass narration through deterministic answers; broader grounded-answer eval coverage remains
+a stated limitation.
 
 ## Context engineering
 

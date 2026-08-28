@@ -269,7 +269,8 @@ write proposal flow. Version 0.1 is GBP-only and rejects other currencies rather
 Exact same-day duplicates without bank external IDs are preserved within a file by occurrence order;
 across partial/overlapping files, external IDs remain the only unambiguous identity. Rows unresolved
 while Ollama is unavailable enter the manual correction queue; automatic deferred reclassification is
-not implemented.
+not implemented. Credit-card payment matching is not modeled: when underlying card purchases are
+also imported, users must classify the bank-to-card payment as a transfer to avoid double counting.
 
 See [docs/architecture.md](docs/architecture.md) and [docs/ai-engineering.md](docs/ai-engineering.md)
 for boundary and learning notes.
