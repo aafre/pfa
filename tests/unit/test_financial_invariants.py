@@ -158,3 +158,18 @@ def test_classifier_receives_signed_amounts_from_the_bank_format_adapter(tmp_pat
     assert classifier.amounts == [-1_250, 250]
     uow.session.close()
     engine.dispose()
+
+
+def test_headerless_csv_returns_a_parser_error_without_mutation(tmp_path) -> None:
+    path = tmp_path / "empty.csv"
+    path.write_text("", encoding="utf-8")
+    engine, uow, _ = services()
+
+    result = ImportService(uow).import_csv(path)
+
+    assert result.imported == 0
+    assert result.errors == ["CSV has no header row"]
+    assert uow.transactions.all() == []
+    assert uow.accounts.all() == []
+    uow.session.close()
+    engine.dispose()

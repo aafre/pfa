@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from itertools import chain
 from pathlib import Path
 from typing import Protocol
 
@@ -107,8 +108,16 @@ class ImportService:
     def import_csv(self, path: Path, dry_run: bool = False) -> ImportResult:
         result = ImportResult()
         occurrences: dict[tuple[str, str, int, str, str], int] = {}
+        rows = read_csv_rows(path)
+        try:
+            first_row = next(rows)
+        except StopIteration:
+            return result
+        except ImportRowError as exc:
+            result.errors.append(str(exc))
+            return result
         with TimedOperation("import_csv", source=path.name, dry_run=dry_run):
-            for row in read_csv_rows(path):
+            for row in chain((first_row,), rows):
                 try:
                     transaction_date = _parse_date(row["date"])
                     if not row["description"]:
