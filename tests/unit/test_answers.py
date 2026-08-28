@@ -59,5 +59,5 @@ def test_affordability_question_accepts_pound_sign() -> None:
         PlanningService(analytics, [], []),
         "Can I afford a \N{POUND SIGN}2,000 purchase?",
     )
-    assert answer is not None and "GBP 2,000.00" in answer
+    assert answer is not None and "GBP -2,000.00" in answer and "False" in answer
     session.close()

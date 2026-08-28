@@ -36,8 +36,7 @@ def build_advisor(settings: Settings) -> Agent[FinanceDependencies, str]:
         deps_type=FinanceDependencies,
         output_type=str,
         system_prompt=(
-            _INSTRUCTIONS
-            + f"\nToday is {date.today().isoformat()}. "
+            _INSTRUCTIONS + f"\nToday is {date.today().isoformat()}. "
             "If a month has no year, use the current year."
         ),
         tools=[
