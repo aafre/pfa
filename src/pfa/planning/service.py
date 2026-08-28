@@ -37,16 +37,24 @@ class PlanningService:
             values.append(self.analytics.monthly_summary(cursor).net_cashflow_minor)
         return round(sum(values) / len(values)) if values else 0
 
+    def _average_monthly_spending(self, as_of: date, months: int = 3) -> int:
+        values = []
+        cursor = as_of.replace(day=1)
+        for _ in range(months):
+            cursor = (cursor.replace(day=1) - timedelta(days=1)).replace(day=1)
+            values.append(max(self.analytics.monthly_summary(cursor).spending_minor, 0))
+        return round(sum(values) / len(values)) if values else 0
+
     def simulate_purchase(
         self, cost_minor: int, horizon_months: int = 3, as_of: date | None = None
     ) -> ScenarioResult:
         as_of = as_of or date.today()
-        starting = current_cash(self.accounts, self.transactions)
+        starting = current_cash(self.accounts, self.transactions, as_of)
         monthly_net = self._average_monthly_net(as_of)
+        average_expenses = self._average_monthly_spending(as_of)
         baseline = starting + monthly_net * horizon_months
         scenario = baseline - cost_minor
-        average_expenses = max(-monthly_net, 0)
-        months = round(scenario / average_expenses, 2) if average_expenses else None
+        months = round(max(scenario, 0) / average_expenses, 2) if average_expenses else None
         return ScenarioResult(
             starting_cash_minor=starting,
             scenario_cost_minor=cost_minor,
@@ -58,6 +66,10 @@ class PlanningService:
                 (
                     "average net cash flow from prior three complete months: "
                     f"{monthly_net} minor units"
+                ),
+                (
+                    "average spending from prior three complete months: "
+                    f"{average_expenses} minor units"
                 ),
                 "purchase occurs immediately; no investment returns assumed",
                 f"horizon: {horizon_months} months",

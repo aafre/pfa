@@ -218,10 +218,14 @@ class AnalyticsService:
         return category_trend(self.transactions.all(), category, as_of, months)
 
 
-def current_cash(accounts: list[AccountModel], transactions: list[TransactionModel]) -> int:
+def current_cash(
+    accounts: list[AccountModel], transactions: list[TransactionModel], as_of: date | None = None
+) -> int:
     opening = sum(
         account.opening_balance_minor
         for account in accounts
         if account.account_type not in {item.value for item in NON_CASH_ACCOUNT_TYPES}
     )
-    return opening + sum(_cash_delta(row) for row in transactions)
+    return opening + sum(
+        _cash_delta(row) for row in transactions if as_of is None or row.transaction_date <= as_of
+    )
