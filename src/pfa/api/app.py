@@ -15,6 +15,7 @@ from starlette.responses import Response
 from pfa.ai.agents.advisor import build_advisor
 from pfa.ai.agents.categorizer import LocalTransactionClassifier
 from pfa.ai.deps import FinanceDependencies
+from pfa.ai.models import available_models
 from pfa.ai.schemas import ChatRequest, ImportRequest
 from pfa.config import Settings, get_settings
 from pfa.ingestion.service import ImportService
@@ -176,6 +177,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             if deterministic:
                 return {"answer": deterministic}
+            names = available_models(active_settings)
+            if names is None or active_settings.model not in names:
+                raise HTTPException(
+                    status_code=503,
+                    detail="local model unavailable; deterministic endpoints remain available",
+                )
             try:
                 result = build_advisor(active_settings).run_sync(
                     request.message,

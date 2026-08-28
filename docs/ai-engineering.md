@@ -33,6 +33,9 @@ while not_done:
 ```
 
 PFA tools call `AnalyticsService` and `PlanningService`; the model never gets arbitrary SQL.
+Money-bearing tool results include integer `*_minor` fields plus deterministic `*_display` GBP
+strings. An output validator rejects currency or percentage claims when the run has no tool result.
+This is harness enforcement, not reliance on prompt obedience.
 
 ## Context engineering
 
@@ -48,6 +51,8 @@ dependency injection, bounded retries, tool timeouts, local-only model configura
 health reporting, request/time/output limits, and graceful inference failure. Initial tools are
 read-only. There is no tool
 for money movement, brokerage execution, or arbitrary database access.
+CLI/API advisor calls and the lazy classifier preflight Ollama model availability, so a missing
+configured model fails within the health-check timeout instead of consuming inference retries.
 
 ## Workflow and termination
 

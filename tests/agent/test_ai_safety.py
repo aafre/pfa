@@ -6,6 +6,7 @@ from pfa.ai.agents.advisor import (
     build_advisor,
     require_grounded_financial_numbers,
 )
+from pfa.ai.agents.categorizer import LocalTransactionClassifier
 from pfa.ai.schemas import TransactionClassification
 from pfa.ai.tools.finance import display_money_fields
 from pfa.config import Settings
@@ -61,3 +62,11 @@ def test_harness_rejects_ungrounded_financial_numbers_and_formats_minor_units() 
         "target_minor": 100_000,
         "target_display": "GBP 1,000.00",
     }
+
+
+def test_classifier_fails_fast_when_configured_model_is_missing(monkeypatch) -> None:
+    monkeypatch.setattr("pfa.ai.agents.categorizer.available_models", lambda settings: set())
+    classifier = LocalTransactionClassifier(Settings(model="missing:4b"))
+
+    assert classifier.classify("Unknown merchant", -1_000) is None
+    assert classifier.agent is None

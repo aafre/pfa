@@ -13,6 +13,7 @@ from rich.table import Table
 from pfa.ai.agents.advisor import build_advisor
 from pfa.ai.agents.categorizer import LocalTransactionClassifier
 from pfa.ai.deps import FinanceDependencies
+from pfa.ai.models import available_models
 from pfa.config import get_settings
 from pfa.db.models import BudgetModel, GoalModel, MerchantRuleModel, TransactionModel
 from pfa.domain.money import Money
@@ -203,6 +204,13 @@ def ask(question: str) -> None:
         if deterministic:
             print_model_text(deterministic)
             return
+        names = available_models(settings)
+        if names is None or settings.model not in names:
+            console.print(
+                "[yellow]Local model unavailable. Use summary/review commands "
+                "for deterministic evidence.[/yellow]"
+            )
+            raise typer.Exit(3)
         try:
             result = build_advisor(settings).run_sync(
                 question,

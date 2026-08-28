@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import httpx
 from sqlalchemy import text
 
+from pfa.ai.models import available_models
 from pfa.config import Settings
 
 
@@ -23,13 +23,11 @@ def health_report(settings: Settings) -> dict[str, object]:
             engine.dispose()
     ollama = "healthy"
     model = "missing"
-    try:
-        response = httpx.get(f"{settings.ollama_base_url.rstrip('/')}/api/tags", timeout=2)
-        response.raise_for_status()
-        names = {str(item.get("name")) for item in response.json().get("models", [])}
-        model = "available" if settings.model in names else "missing"
-    except Exception:
+    names = available_models(settings)
+    if names is None:
         ollama = "unavailable"
+    else:
+        model = "available" if settings.model in names else "missing"
     status = (
         "healthy"
         if database == "healthy" and ollama == "healthy" and model == "available"

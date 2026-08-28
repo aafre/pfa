@@ -2,7 +2,7 @@
 
 A 100% local personal finance intelligence system that runs entirely on your machine.
 
-LocalLedger understands your financial position over time, explains where money is going, detects anomalies and behavioural drift, models future decisions, and enforces deterministic budget tracking without leaking data to cloud APIs.
+PFA understands your financial position over time, explains where money is going, detects anomalies and behavioural drift, models future decisions, and enforces deterministic budget tracking without leaking data to cloud APIs.
 
 ## Architecture Principles
 
@@ -16,7 +16,8 @@ LocalLedger understands your financial position over time, explains where money 
 - [Ollama](https://ollama.com/) running locally
 
 ```bash
-ollama pull qwen2.5:3b
+ollama pull qwen3:4b
+```
 
 
 
@@ -110,6 +111,7 @@ Not from the LLM.
 
 
 
+```text
                   ┌────────────────────────┐
                   │          LLM           │
                   │                        │
@@ -144,6 +146,7 @@ Not from the LLM.
                   │ budgets                │
                   │ goals                  │
                   └────────────────────────┘
+```
 
 
 
@@ -155,6 +158,7 @@ the model must not have calculated £632.17.
 
 A tool should have returned:
 
+```json
 {
   "period": "2026-08",
   "category": "eating_out",
@@ -162,6 +166,7 @@ A tool should have returned:
   "currency": "GBP",
   "transaction_count": 31
 }
+```
 
 The LLM merely explains it.
 
@@ -182,8 +187,10 @@ The production package is under `src/pfa`:
 Calculations define savings rate as `(saving transfers + investment transfers) / income` for the period.
 For paired owned-account transfers, only the debit/outgoing side contributes to that numerator.
 Spending includes classified expenses and fees, less refunds. Cash withdrawals affect cash position
-but are not spending until the underlying purchase is classified. Owned-account transfers do not
-count as income or spending.
+but are not spending until the underlying purchase is classified. PFA treats withdrawals as movement
+from bank cash to physical cash, so tracked total cash is unchanged. Refunds reduce spending in the
+month the refund posts, even when the original purchase was in an earlier month. Owned-account
+transfers do not count as income or spending.
 
 ## Requirements and setup
 
@@ -258,7 +265,11 @@ Current limitations include bank-specific CSV quirks, manual handling of opening
 heuristic recurring/anomaly detection. Recurring evidence supports weekly, monthly, and quarterly
 cadences; annual schedules and missing-month recovery are not inferred. Future work: richer import
 adapters, a local review UI, stronger evals for groundedness, and opt-in audit logs for any future
-write proposal flow.
+write proposal flow. Version 0.1 is GBP-only and rejects other currencies rather than summing them.
+Exact same-day duplicates without bank external IDs are preserved within a file by occurrence order;
+across partial/overlapping files, external IDs remain the only unambiguous identity. Rows unresolved
+while Ollama is unavailable enter the manual correction queue; automatic deferred reclassification is
+not implemented.
 
 See [docs/architecture.md](docs/architecture.md) and [docs/ai-engineering.md](docs/ai-engineering.md)
 for boundary and learning notes.
