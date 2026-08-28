@@ -191,7 +191,7 @@ works without Ollama.
 
 ```bash
 uv sync
-uv run pfa db init
+uv run pfa db migrate
 ollama pull qwen3:4b
 ```
 

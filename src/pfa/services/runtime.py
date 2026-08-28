@@ -6,7 +6,7 @@ from sqlalchemy.engine import Engine
 
 from pfa.analytics.service import AnalyticsService
 from pfa.config import Settings
-from pfa.db.engine import init_db, make_engine, make_session_factory
+from pfa.db.engine import make_engine, make_session_factory
 from pfa.db.unit_of_work import UnitOfWork
 from pfa.planning.service import PlanningService
 
@@ -20,12 +20,16 @@ class FinanceServices:
 
 def open_services(settings: Settings) -> tuple[Engine, FinanceServices]:
     engine = make_engine(settings)
-    init_db(engine)
     session = make_session_factory(engine)()
-    uow = UnitOfWork(session)
-    analytics = AnalyticsService(uow.transactions, uow.budgets, uow.goals)
-    planning = PlanningService(analytics, uow.accounts.all(), uow.transactions.all())
-    return engine, FinanceServices(uow, analytics, planning)
+    try:
+        uow = UnitOfWork(session)
+        analytics = AnalyticsService(uow.transactions, uow.budgets, uow.goals)
+        planning = PlanningService(analytics, uow.accounts.all(), uow.transactions.all())
+        return engine, FinanceServices(uow, analytics, planning)
+    except Exception:
+        session.close()
+        engine.dispose()
+        raise
 
 
 def close_services(engine: Engine, services: FinanceServices, commit: bool = True) -> None:

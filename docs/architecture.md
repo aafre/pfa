@@ -21,6 +21,8 @@ flowchart TD
 
 - `domain` contains enums, money rules, and small value objects.
 - `db` owns SQLAlchemy models, sessions, and repository access.
+- Alembic migrations are the authoritative production schema path. Runtime service creation never
+  creates or upgrades tables; run `pfa db migrate` before using CLI or API workflows.
 - `ingestion` parses and validates source rows, deduplicates, then classifies.
 - `analytics` calculates facts from typed transaction records.
 - `planning` calculates projections from explicit assumptions.
