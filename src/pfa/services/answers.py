@@ -5,6 +5,7 @@ from datetime import date
 
 from pfa.analytics.service import AnalyticsService
 from pfa.domain.money import Money
+from pfa.domain.transactions import SpendingCategory
 from pfa.planning.service import PlanningService
 
 _MONTHS = {
@@ -27,6 +28,7 @@ _MONTHS = {
         start=1,
     )
 }
+_CATEGORY_ALIASES = {item.value.replace("_", " "): item.value for item in SpendingCategory}
 
 
 def _amount(minor: int) -> str:
@@ -44,6 +46,42 @@ def deterministic_answer(
 ) -> str | None:
     """Answer common factual intents without asking a model to choose numeric parameters."""
     lower = question.lower()
+    if "how much" in lower and ("spend" in lower or "spent" in lower):
+        category = next(
+            (value for alias, value in _CATEGORY_ALIASES.items() if alias in lower), None
+        )
+        month_name = next((name for name in _MONTHS if re.search(rf"\b{name}\b", lower)), None)
+        if category and month_name:
+            period = _period_for_name(analytics, month_name)
+            if period:
+                total = next(
+                    (
+                        item.total_minor
+                        for item in analytics.category_spending(period)
+                        if item.category == category
+                    ),
+                    0,
+                )
+                return f"{category} spending in {period.strftime('%Y-%m')} was {_amount(total)}."
+    if "categories" in lower and "increased" in lower:
+        rows = analytics.transactions.all()
+        if rows:
+            latest = max(row.transaction_date for row in rows).replace(day=1)
+            categories = sorted({row.category for row in rows if row.category})
+            increases = []
+            for category in categories:
+                points = analytics.category_trend(category, latest, 3)
+                delta = int(points[-1]["total_minor"]) - int(points[0]["total_minor"])
+                if delta > 0:
+                    increases.append((category, delta))
+            increases.sort(key=lambda item: -item[1])
+            if not increases:
+                return (
+                    "No category increased from the first to the last of the latest three months."
+                )
+            return "Category increases over the latest three months: " + "; ".join(
+                f"{category} +{_amount(delta)}" for category, delta in increases
+            )
     if "more expensive" in lower or "compared with" in lower:
         names = list(dict.fromkeys(re.findall(r"\b(" + "|".join(_MONTHS) + r")\b", lower)))
         if len(names) >= 2:
@@ -104,12 +142,4 @@ def deterministic_answer(
                 f"baseline {_amount(result.baseline_month_end_cash_minor)}. "
                 f"Affordable under the stated model: {result.affordable}."
             )
-    if "afford" in lower and (match := re.search(r"(?:£|gbp)\s*([\d,]+(?:\.\d{1,2})?)", lower)):
-        cost = Money.from_major(match.group(1).replace(",", "")).minor
-        result = planning.simulate_purchase(cost)
-        return (
-            f"Scenario result: projected cash is {_amount(result.projected_month_end_cash_minor)} "
-            f"versus baseline {_amount(result.baseline_month_end_cash_minor)}. "
-            f"Affordable under the stated model: {result.affordable}."
-        )
     return None

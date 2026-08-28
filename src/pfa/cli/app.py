@@ -82,6 +82,8 @@ def db_migrate() -> None:
 
 @app.command("import")
 def import_transactions(path: Path, dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+    if not path.is_file() or path.suffix.lower() != ".csv":
+        raise typer.BadParameter("path must identify a local CSV file")
     engine, services = open_services(get_settings())
     try:
         importer = ImportService(services.uow, LocalTransactionClassifier(get_settings()))
@@ -213,6 +215,7 @@ def ask(question: str) -> None:
                 "[yellow]Local model unavailable. Use summary/review commands "
                 "for deterministic evidence.[/yellow]"
             )
+            raise typer.Exit(3) from None
     finally:
         close_services(engine, services)
 

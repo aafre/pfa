@@ -61,3 +61,49 @@ def test_affordability_question_accepts_pound_sign() -> None:
     )
     assert answer is not None and "GBP -2,000.00" in answer and "False" in answer
     session.close()
+
+
+def test_category_amount_and_three_month_change_are_deterministic() -> None:
+    from pfa.config import Settings
+
+    engine = make_engine(Settings(database_url="sqlite:///:memory:"))
+    init_db(engine)
+    session = make_session_factory(engine)()
+    uow = UnitOfWork(session)
+    account = uow.accounts.get_or_create("Main")
+    for day, amount, category in (
+        (date(2026, 6, 1), 10_000, "eating_out"),
+        (date(2026, 6, 2), 20_000, "groceries"),
+        (date(2026, 7, 1), 15_000, "eating_out"),
+        (date(2026, 8, 1), 25_000, "eating_out"),
+        (date(2026, 8, 2), 15_000, "groceries"),
+    ):
+        uow.transactions.add(
+            TransactionModel(
+                account_id=account.id,
+                transaction_date=day,
+                raw_description=category,
+                normalized_description=category.upper(),
+                merchant=category.upper(),
+                amount_minor=amount,
+                flow_direction="debit",
+                currency="GBP",
+                kind="expense",
+                category=category,
+                classification_source="import",
+                import_source="test",
+                fingerprint=f"{day}-{category}",
+            )
+        )
+    analytics = AnalyticsService(uow.transactions, uow.budgets, uow.goals)
+    planning = PlanningService(analytics, [account], uow.transactions.all())
+
+    amount = deterministic_answer(analytics, planning, "How much did I spend eating out in August?")
+    changes = deterministic_answer(
+        analytics, planning, "What categories increased over the last three months?"
+    )
+
+    assert amount is not None and "GBP 250.00" in amount
+    assert changes is not None and "eating_out +GBP 150.00" in changes
+    assert "groceries" not in changes
+    session.close()
