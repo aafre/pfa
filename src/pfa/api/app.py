@@ -4,8 +4,9 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 from pydantic_ai import UsageLimits
 from starlette.requests import Request
@@ -98,10 +99,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise
 
     @app.get("/transactions", response_model=list[TransactionResponse])
-    def transactions(limit: int = 100) -> list[TransactionResponse]:
+    def transactions(
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    ) -> list[TransactionResponse]:
         engine, services = open_services(active_settings)
         try:
-            rows = services.uow.transactions.all()[-max(1, min(limit, 500)) :]
+            rows = services.uow.transactions.all()[-limit:]
             return [
                 TransactionResponse(
                     id=row.id,

@@ -6,17 +6,21 @@ from sqlalchemy import text
 from pfa.config import Settings
 
 
-def health_report(settings: Settings, database_url: str | None = None) -> dict[str, object]:
+def health_report(settings: Settings) -> dict[str, object]:
     database = "healthy"
+    engine = None
     try:
         from pfa.db.engine import make_engine
 
         engine = make_engine(settings)
         with engine.connect() as connection:
-            connection.execute(text("SELECT 1"))
-        engine.dispose()
+            connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+            connection.execute(text("SELECT 1 FROM accounts LIMIT 1"))
     except Exception:
         database = "unhealthy"
+    finally:
+        if engine is not None:
+            engine.dispose()
     ollama = "healthy"
     model = "missing"
     try:
@@ -40,5 +44,4 @@ def health_report(settings: Settings, database_url: str | None = None) -> dict[s
         "ollama": ollama,
         "model": model,
         "configured_model": settings.model,
-        "database_url": database_url or settings.database_url,
     }

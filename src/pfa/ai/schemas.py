@@ -30,5 +30,5 @@ class ChatRequest(BaseModel):
 
 
 class ImportRequest(BaseModel):
-    path: str
+    path: str = Field(min_length=1, max_length=4096)
     dry_run: bool = False
