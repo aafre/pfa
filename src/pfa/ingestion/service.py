@@ -140,7 +140,7 @@ class ImportService:
                     if self.uow.transactions.find_fingerprint(fingerprint):
                         result.duplicates += 1
                         continue
-                    rule = self.uow.rules.match(row["description"])
+                    rule = self.uow.rules.match(normalized)
                     classification = (
                         _classification_from_rule(rule)
                         if rule

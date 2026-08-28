@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 
 from pfa.domain.transactions import SpendingCategory, TransactionKind, TransferPurpose
@@ -95,6 +96,6 @@ _RULES: tuple[tuple[str, Classification], ...] = (
 def classify_known(description: str) -> Classification | None:
     upper = description.upper()
     for pattern, classification in _RULES:
-        if pattern in upper:
+        if re.search(rf"(?<![A-Z0-9]){re.escape(pattern)}(?![A-Z0-9])", upper):
             return classification
     return None

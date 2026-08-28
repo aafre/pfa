@@ -78,7 +78,7 @@ class RuleRepository:
     def match(self, description: str) -> MerchantRuleModel | None:
         rules = self.session.scalars(select(MerchantRuleModel)).all()
         upper = description.upper()
-        return next((rule for rule in rules if rule.pattern.upper() in upper), None)
+        return next((rule for rule in rules if rule.pattern.upper() == upper), None)
 
     def find_pattern(self, pattern: str) -> MerchantRuleModel | None:
         return self.session.scalar(
