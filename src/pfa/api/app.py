@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from pydantic_ai import UsageLimits
 from starlette.requests import Request
 from starlette.responses import Response
+from starlette.staticfiles import StaticFiles
 
 from pfa.ai.agents.advisor import build_advisor
 from pfa.ai.agents.categorizer import LocalTransactionClassifier
@@ -66,6 +67,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         close_services(engine, services)
 
     app = FastAPI(title="PFA", version="0.1.0", lifespan=lifespan)
+
+    web_root = Path(__file__).resolve().parent.parent / "web"
+    app.mount("/static", StaticFiles(directory=web_root), name="static")
 
     @app.middleware("http")
     async def observe_request(
@@ -205,6 +209,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return monthly_review_evidence(services.analytics, _month(month))
         finally:
             close_services(engine, services)
+
+    @app.get("/", include_in_schema=False)
+    def dashboard() -> Response:
+        html = (web_root / "index.html").read_text(encoding="utf-8")
+        return Response(html, media_type="text/html")
 
     return app
 
