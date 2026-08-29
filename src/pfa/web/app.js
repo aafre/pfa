@@ -165,21 +165,36 @@ async function loadMonthData(period) {
   // Check health
   try {
     const health = await getJson("/health");
-    state.modelAvailable = Boolean(health.model_available);
+    state.modelAvailable = modelIsUsable(health);
     updateHealthUI(health);
   } catch (_) {
-    updateHealthUI({ database_connected: true, model_available: false });
+    // The API is unreachable, so nothing about the local stack is known to be up.
+    updateHealthUI({ database: "unhealthy", ollama: "unavailable", model: "missing" });
   }
 
   updateMonthMenu();
   renderCurrentRoute();
 }
 
+// /health reports `database`, `ollama` and `model` as words, not booleans. Reading it as
+// {database_connected, model_available} made every field undefined, so the dashboard
+// announced "Rules Only" even with Ollama up and the configured model pulled.
+function modelIsUsable(health) {
+  return health.ollama === "healthy" && health.model === "available";
+}
+
 function updateHealthUI(health) {
-  $("database-status").textContent = health.database_connected ? "Connected (SQLite)" : "Disconnected";
-  $("model-status").textContent = health.model_available ? "Active (Ollama)" : "Offline (Rules only)";
-  $("topbar-model-text").textContent = health.model_available ? "AI Advisor Ready" : "Deterministic Engine (Rules Only)";
-  $("topbar-model-badge").classList.toggle("is-offline", !health.model_available);
+  const usable = modelIsUsable(health);
+  $("database-status").textContent =
+    health.database === "healthy" ? "Connected (SQLite)" : "Disconnected";
+  // Ollama down and model-not-pulled need different actions from the user, so say which.
+  $("model-status").textContent = usable
+    ? "Active (Ollama)"
+    : health.ollama === "healthy"
+      ? `Model "${health.configured_model || "?"}" not pulled (Rules only)`
+      : "Ollama offline (Rules only)";
+  $("topbar-model-text").textContent = usable ? "AI Advisor Ready" : "Deterministic Engine (Rules Only)";
+  $("topbar-model-badge").classList.toggle("is-offline", !usable);
   $("sync-text").textContent = state.source === "live" ? "Local database verified" : "Demo preview dataset";
 }
 
