@@ -100,6 +100,13 @@ def _run_extraction(source: StatementSource, settings: Settings) -> ExtractionRe
     )
     try:
         return future.result(timeout=settings.extraction_timeout_seconds)
+    except concurrent.futures.TimeoutError:
+        # ponytail: a running parser thread cannot be killed and still holds the staged
+        # file open, so the request's own unlink can lose to it. Hand cleanup to the
+        # worker's completion rather than leaking the statement; upgrade path is a
+        # cancellable out-of-process extractor if nominal timeouts stop being enough.
+        future.add_done_callback(lambda _: source.path.unlink(missing_ok=True))
+        raise
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
 
@@ -193,6 +200,9 @@ def load_batch(uow: UnitOfWork, batch_id: str) -> ImportBatchModel:
         raise BatchError(BATCH_NOT_FOUND, "import batch not found", 404)
     if expire_if_due(batch):
         uow.import_batches.add(batch)
+        # The purge is a TTL/privacy boundary, not part of the caller's transaction: the
+        # request that discovers expiry goes on to fail with 410 and would roll it back.
+        uow.session.commit()
     if batch.status == "expired":
         raise BatchError(BATCH_EXPIRED, "import batch expired; upload the statement again", 410)
     return batch

@@ -1,3 +1,4 @@
+import time
 from datetime import UTC, datetime, timedelta
 
 from alembic import command
@@ -9,6 +10,8 @@ from pfa.config import Settings
 from pfa.db.engine import make_engine, make_session_factory
 from pfa.db.models import ImportBatchModel
 from pfa.db.repositories import TransactionRepository
+from pfa.ingestion.candidates import ExtractionResult
+from pfa.ingestion.extractors.csv import CsvStatementExtractor
 
 
 def _settings(tmp_path, **overrides) -> Settings:
@@ -131,15 +134,7 @@ def test_expired_batch_returns_410_and_discard_and_committed_delete_rules(tmp_pa
         preview = _upload(client, _csv_bytes())
         batch_id = preview.json()["id"]
 
-        # Force expiry directly, simulating the TTL having elapsed.
-        engine = make_engine(settings)
-        session = make_session_factory(engine)()
-        batch = session.get(ImportBatchModel, batch_id)
-        assert batch is not None
-        batch.expires_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=1)
-        session.commit()
-        session.close()
-        engine.dispose()
+        _force_expiry(settings, batch_id)
 
         expired_get = client.get(f"/imports/{batch_id}")
         assert expired_get.status_code == 410
@@ -221,3 +216,88 @@ def test_no_raw_uploaded_bytes_anywhere_in_sqlite(tmp_path) -> None:
     db_bytes = db_path.read_bytes()
     assert csv_bytes not in db_bytes
     assert list(settings.upload_dir.iterdir()) == []
+
+
+def _force_expiry(settings: Settings, batch_id: str) -> None:
+    """Puts the TTL in the past directly, standing in for elapsed wall-clock time."""
+    engine = make_engine(settings)
+    session = make_session_factory(engine)()
+    batch = session.get(ImportBatchModel, batch_id)
+    assert batch is not None
+    batch.expires_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=1)
+    session.commit()
+    session.close()
+    engine.dispose()
+
+
+def _reload_batch(settings: Settings, batch_id: str) -> ImportBatchModel:
+    """Reads the row through a fresh engine, so nothing in-session can mask a rollback."""
+    engine = make_engine(settings)
+    session = make_session_factory(engine)()
+    batch = session.get(ImportBatchModel, batch_id)
+    assert batch is not None
+    session.expunge(batch)
+    session.close()
+    engine.dispose()
+    return batch
+
+
+def test_expiry_purge_survives_the_410_response(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        batch_id = _upload(client, _csv_bytes()).json()["id"]
+        _force_expiry(settings, batch_id)
+
+        expired = client.get(f"/imports/{batch_id}")
+        assert expired.status_code == 410
+        assert expired.json()["detail"]["code"] == "BATCH_EXPIRED"
+
+    # The 410 is raised as an error, which rolls the request back - the purge must not
+    # ride along, or candidate rows outlive their TTL.
+    persisted = _reload_batch(settings, batch_id)
+    assert persisted.status == "expired"
+    assert persisted.candidates_json is None
+
+
+def test_extraction_timeout_is_reported_and_leaves_no_staged_file(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path, extraction_timeout_seconds=0.05)
+
+    def slow_extract(self, source):  # type: ignore[no-untyped-def]
+        # Holds the staged file open past the timeout, which is what makes the request's
+        # own unlink fail on Windows.
+        with source.path.open("rb"):
+            time.sleep(0.6)
+        return ExtractionResult(candidates=[])
+
+    monkeypatch.setattr(CsvStatementExtractor, "extract", slow_extract)
+
+    with TestClient(create_app(settings), raise_server_exceptions=False) as client:
+        response = _upload(client, _csv_bytes())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "failed"
+    assert [issue["code"] for issue in body["issues"]] == ["EXTRACTION_TIMEOUT"]
+    # Sanitized: the batch metadata is by design, the staged path and traceback are not.
+    assert str(settings.upload_dir) not in response.text
+    assert "Traceback" not in response.text
+
+    # Cleanup is deferred to the worker thread, so give it until it finishes.
+    deadline = time.monotonic() + 10
+    while list(settings.upload_dir.iterdir()) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert list(settings.upload_dir.iterdir()) == []
+
+
+def test_service_open_failure_after_staging_leaves_no_staged_file(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path)
+
+    def unavailable(_settings):  # type: ignore[no-untyped-def]
+        raise RuntimeError("simulated database unavailability")
+
+    with TestClient(create_app(settings), raise_server_exceptions=False) as client:
+        # Patched only after startup, so the app opens normally and fails on the request.
+        monkeypatch.setattr("pfa.api.app.open_services", unavailable)
+        response = _upload(client, _csv_bytes())
+        assert response.status_code == 500
+        assert list(settings.upload_dir.iterdir()) == []

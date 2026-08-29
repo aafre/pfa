@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import date, datetime
 from pathlib import Path
 from typing import Annotated
@@ -268,17 +268,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status_code=status_code, detail={"code": exc.code, "message": exc.message}
             ) from exc
 
-        engine, services = open_services(active_settings)
         try:
-            batch = create_batch(services.uow, source, active_settings, account=account)
-            response = _batch_response(batch)
-            close_services(engine, services)
-            return response
-        except Exception:
-            close_services(engine, services, False)
-            raise
+            engine, services = open_services(active_settings)
+            try:
+                batch = create_batch(services.uow, source, active_settings, account=account)
+                response = _batch_response(batch)
+                close_services(engine, services)
+                return response
+            except Exception:
+                close_services(engine, services, False)
+                raise
         finally:
-            source.path.unlink(missing_ok=True)
+            # open_services() belongs inside this boundary: a database that won't open
+            # must not strand the staged statement. The unlink can still lose to a
+            # timed-out extraction thread holding the file open (Windows); _run_extraction
+            # owns cleanup in that case, so a failed unlink here is not an error.
+            with suppress(OSError):
+                source.path.unlink(missing_ok=True)
 
     @app.get("/imports/{batch_id}", response_model=ImportBatchResponse)
     def get_import_batch(batch_id: str) -> ImportBatchResponse:
