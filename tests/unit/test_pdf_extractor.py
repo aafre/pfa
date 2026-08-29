@@ -74,7 +74,28 @@ def test_wrapped_description_joins_into_the_row_above_within_line_height(tmp_pat
     assert candidate.issues == []
 
 
-def test_continuation_line_far_from_any_row_becomes_its_own_warning_row(tmp_path: Path) -> None:
+def test_broken_data_rows_do_not_join_into_previous_description(tmp_path: Path) -> None:
+    columns = [72.0, 160.0, 400.0]
+    rows = [
+        ["Date", "Description", "Amount"],
+        ["01/08/2026", "Tesco Metro", "-12.50"],
+        ["21 Jul 25", "E.ON NEXT COVENTRY", "-295.79"],
+        ["02/08/2026", "Salary", "2000.00"],
+        ["03/08/2026", "Card payment", "450.62CR"],
+    ]
+
+    result = _extract(tmp_path, [statement_page(rows, columns)])
+
+    assert len(result.candidates) == 4
+    assert [c.raw_description for c in result.candidates] == [
+        "Tesco Metro",
+        "E.ON NEXT COVENTRY",
+        "Salary",
+        "Card payment",
+    ]
+
+
+def test_continuation_line_far_from_any_row_is_dropped_as_noise(tmp_path: Path) -> None:
     columns = [72.0, 160.0, 400.0]
     rows = [
         ["Date", "Description", "Amount"],
@@ -86,12 +107,48 @@ def test_continuation_line_far_from_any_row_becomes_its_own_warning_row(tmp_path
 
     result = _extract(tmp_path, [page])
 
-    assert len(result.candidates) == 2
-    orphan = result.candidates[1]
-    assert orphan.transaction_date is None
-    assert orphan.raw_description == "Orphan note"
-    assert [issue.code for issue in orphan.issues] == [codes.UNJOINED_CONTINUATION]
-    assert orphan.issues[0].severity == codes.WARNING
+    assert len(result.candidates) == 1
+    assert result.candidates[0].raw_description == "Tesco Metro"
+
+
+def test_amex_banner_header_does_not_turn_statement_chatter_into_candidates(
+    tmp_path: Path,
+) -> None:
+    columns = [72.0, 160.0, 300.0, 420.0, 500.0]
+    rows = [
+        ["Prepared for", "Membership Number", "", "", "Date"],
+        ["A CUSTOMER", "xxxx-xxxxxx-12345", "", "", "19/08/25"],
+        ["", "", "", "", ""],
+        ["Date", "Date", "Transaction Details", "Foreign Spend", "Amount"],
+        ["Jul31", "Jul31", "PAYMENT RECEIVED - THANK YOU", "", "1,940.64"],
+        ["", "", "", "", "CR"],
+        ["Jul21", "Jul21", "ZETTLE *REDACTED", "", "6.30"],
+        ["", "", "Important information about your account", "", ""],
+        ["", "", "Visit americanexpress.com/offers", "", ""],
+    ]
+
+    result = _extract(tmp_path, [statement_page(rows, columns)])
+
+    assert [(c.transaction_date, c.raw_description) for c in result.candidates] == []
+    assert [issue.code for issue in result.issues] == [codes.PDF_NOT_EXTRACTABLE]
+
+
+def test_header_with_zero_plausible_data_rows_reports_pdf_not_extractable(
+    tmp_path: Path,
+) -> None:
+    columns = [72.0, 160.0, 400.0]
+    rows = [
+        ["Date", "Description", "Amount"],
+        ["", "Important information", ""],
+        ["", "No transaction activity this period", ""],
+    ]
+
+    result = _extract(tmp_path, [statement_page(rows, columns)])
+
+    assert [
+        (c.transaction_date, c.raw_description, c.amount_minor) for c in result.candidates
+    ] == []
+    assert [issue.code for issue in result.issues] == [codes.PDF_NOT_EXTRACTABLE]
 
 
 def test_parenthesised_amount_is_negative(tmp_path: Path) -> None:

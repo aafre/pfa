@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -29,7 +30,6 @@ from pfa.ingestion.candidates import (
     PDF_NOT_EXTRACTABLE,
     PDF_TOO_MANY_PAGES,
     TOO_MANY_ROWS,
-    UNJOINED_CONTINUATION,
     WARNING,
     CandidateIssue,
     CandidateTransaction,
@@ -52,6 +52,8 @@ _HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "balance": ("balance",),
     "reference": ("reference", "transaction id"),
 }
+_AMOUNT_FIELDS = ("amount", "debit", "credit")
+_DATE_PATTERNS = ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%m/%d/%Y")
 
 _LINE_TOLERANCE = 3.0  # points; words within this many points of `top` share a line
 _CELL_GAP = 10.0  # points; a horizontal gap larger than this starts a new cell/column
@@ -81,6 +83,10 @@ def _match_header(cell_text: str) -> str | None:
     return None
 
 
+def _has_transaction_header_fields(names: set[str]) -> bool:
+    return "date" in names and bool(names.intersection(_AMOUNT_FIELDS))
+
+
 @dataclass(slots=True)
 class _RawRow:
     """One candidate-shaped row before amount normalization and continuation joining."""
@@ -100,7 +106,7 @@ def _table_header(table: list[list[str | None]]) -> dict[int, str] | None:
         matched = _match_header(cell or "")
         if matched:
             mapping[index] = matched
-    return mapping if "date" in mapping.values() else None
+    return mapping if _has_transaction_header_fields(set(mapping.values())) else None
 
 
 def _table_rows(
@@ -160,7 +166,8 @@ def _header_columns(
     cells: list[tuple[float, str, float | None]],
 ) -> list[tuple[float, str]] | None:
     columns = [(x0, matched) for x0, text, _ in cells if (matched := _match_header(text))]
-    if "date" not in {name for _, name in columns}:
+    names = {name for _, name in columns}
+    if not _has_transaction_header_fields(names):
         return None
     return columns
 
@@ -214,11 +221,28 @@ def _word_rows(words: list[Word], page_number: int) -> tuple[list[_RawRow], floa
     return rows, header_top
 
 
-def _has_date_or_amount(row: _RawRow) -> bool:
-    return bool(row.fields.get("date", "").strip()) or bool(
-        row.fields.get("amount", "").strip()
-        or row.fields.get("debit", "").strip()
-        or row.fields.get("credit", "").strip()
+def _has_parseable_date(fields: dict[str, str]) -> bool:
+    value = fields.get("date", "").strip()
+    for pattern in _DATE_PATTERNS:
+        try:
+            datetime.strptime(value, pattern)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _has_parseable_amount(fields: dict[str, str]) -> bool:
+    return any(_signed_minor(fields.get(field, "")) is not None for field in _AMOUNT_FIELDS)
+
+
+def _is_plausible_data_row(row: _RawRow) -> bool:
+    return _has_parseable_date(row.fields) and _has_parseable_amount(row.fields)
+
+
+def _has_filled_transaction_cell(row: _RawRow) -> bool:
+    return bool(row.fields.get("date", "").strip()) or any(
+        row.fields.get(field, "").strip() for field in _AMOUNT_FIELDS
     )
 
 
@@ -236,21 +260,20 @@ def _line_height(rows: list[_RawRow], header_top: float | None) -> float:
     return min(diffs) if diffs else _DEFAULT_LINE_HEIGHT
 
 
-def _merge_continuations(
-    rows: list[_RawRow], header_top: float | None
-) -> list[tuple[_RawRow, bool]]:
-    """Joins wrapped description lines into the row above them, in place.
-
-    Returns the rows that remain their own candidates, each paired with whether it is an
-    orphan continuation line (no date, no amount, too far from the row above to join) -
-    those are never dropped, only flagged.
-    """
+def _merge_continuations(rows: list[_RawRow], header_top: float | None) -> list[_RawRow]:
+    """Joins structurally empty wrapped description lines into the row above them."""
+    has_plausible_row = any(row.top is not None and _is_plausible_data_row(row) for row in rows)
     threshold = _line_height(rows, header_top) * _CONTINUATION_FACTOR
-    kept: list[tuple[_RawRow, bool]] = []
+    kept: list[_RawRow] = []
     last: _RawRow | None = None
     for row in rows:
-        if row.top is None or _has_date_or_amount(row):
-            kept.append((row, False))
+        has_description = bool(row.fields.get("description", "").strip())
+        if (
+            row.top is None
+            or _is_plausible_data_row(row)
+            or (_has_filled_transaction_cell(row) and (has_plausible_row or has_description))
+        ):
+            kept.append(row)
             last = row
             continue
         joined = row.fields.get("description", "").strip() or row.raw_text.strip()
@@ -260,9 +283,6 @@ def _merge_continuations(
                 last.fields["description"] = f"{existing} {joined}".strip()
             last.raw_text = f"{last.raw_text} / {row.raw_text}"
             last.top = row.top  # chain distance from the most recently joined line
-            continue
-        kept.append((row, True))
-        last = row
     return kept
 
 
@@ -273,7 +293,7 @@ class _AmountResult:
     issue: CandidateIssue | None = None
 
 
-def _clean_amount_text(text: str) -> tuple[str, bool]:
+def clean_amount_text(text: str) -> tuple[str, bool]:
     """Strips sign/currency/thousands markers. Returns (digits-and-dot, is_negative)."""
     cleaned = text.strip()
     negative = False
@@ -293,7 +313,7 @@ def _clean_amount_text(text: str) -> tuple[str, bool]:
 
 
 def _signed_minor(text: str) -> tuple[int, bool] | None:
-    cleaned, negative = _clean_amount_text(text)
+    cleaned, negative = clean_amount_text(text)
     if not cleaned:
         return None
     try:
@@ -348,9 +368,7 @@ def _resolve_amount(fields: dict[str, str]) -> _AmountResult:
     return _AmountResult()
 
 
-def _build_candidate(
-    index: int, row: _RawRow, orphan: bool, ocr_min_confidence: float
-) -> CandidateTransaction:
+def _build_candidate(index: int, row: _RawRow, ocr_min_confidence: float) -> CandidateTransaction:
     fields = row.fields
     raw_fields = {name: value for name, value in fields.items() if value.strip()}
     raw_fields["raw_text"] = row.raw_text
@@ -372,12 +390,6 @@ def _build_candidate(
     else:
         candidate.amount_minor = amount.minor
         candidate.direction = amount.direction
-    if orphan:
-        candidate.add_issue(
-            UNJOINED_CONTINUATION,
-            "line has no date or amount and sits too far from the row above it to join",
-            WARNING,
-        )
     if row.is_ocr:
         candidate.add_issue(
             OCR_EXTRACTED,
@@ -458,14 +470,14 @@ class PdfStatementExtractor:
             )
             return result
 
-        kept: list[tuple[_RawRow, bool]] = []
+        kept: list[_RawRow] = []
         for page in pdf.pages:
             page_rows, header_top = self._page_rows(page)
             kept.extend(_merge_continuations(page_rows, header_top))
 
         candidates = [
-            _build_candidate(index, row, orphan, self._ocr_min_confidence)
-            for index, (row, orphan) in enumerate(kept, start=1)
+            _build_candidate(index, row, self._ocr_min_confidence)
+            for index, row in enumerate(kept, start=1)
         ]
         if len(candidates) > self._max_rows:
             candidates = candidates[: self._max_rows]
