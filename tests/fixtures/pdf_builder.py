@@ -96,3 +96,23 @@ def statement_page(
 def write_pdf(path: Path, pages: list[list[Placement]]) -> Path:
     path.write_bytes(build_pdf(pages))
     return path
+
+
+def write_scanned_pdf(path: Path, lines: list[str], *, size: tuple[int, int] = (850, 1100)) -> Path:
+    """Writes a one-page, image-only PDF: a raster of `lines`, no PDF text layer at all.
+
+    This is the "scanned statement" fixture - Pillow's PDF writer embeds the image directly
+    with no vector text, so pdfplumber's native extract_text()/extract_words() come back
+    empty and the page qualifies for OCR. The drawn text is never read by the real Tesseract
+    in tests (the runner is stubbed) - it only needs to exist so the page has visible content.
+    """
+    from PIL import Image, ImageDraw
+
+    image = Image.new("RGB", size, "white")
+    draw = ImageDraw.Draw(image)
+    y = 20
+    for line in lines:
+        draw.text((20, y), line, fill="black")
+        y += 20
+    image.save(path, "PDF")
+    return path

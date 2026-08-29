@@ -9,7 +9,7 @@ is the first caller and will reach the renderer only through pdfplumber.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -22,6 +22,9 @@ from pfa.config import get_settings
 from pfa.domain.money import Money
 from pfa.ingestion.candidates import (
     AMBIGUOUS_SIGN,
+    ERROR,
+    OCR_EXTRACTED,
+    OCR_LOW_CONFIDENCE,
     PDF_ENCRYPTED,
     PDF_NOT_EXTRACTABLE,
     PDF_TOO_MANY_PAGES,
@@ -56,6 +59,10 @@ _DEFAULT_LINE_HEIGHT = 12.0  # points; used only when a page has under two lines
 _CONTINUATION_FACTOR = 1.6
 _CURRENCY_CHARS = "£$€"  # £ $ €
 _UNICODE_MINUS = "−"
+# Fields an OCR_LOW_CONFIDENCE check applies to - the financial fields a wrong OCR glyph
+# would silently corrupt. Description/reference are never blocking: a misread word there is
+# a cosmetic problem, not a wrong amount or date.
+_OCR_CRITICAL_FIELDS = ("date", "amount", "debit", "credit")
 
 Word = dict[str, Any]
 WordProvider = Callable[[Page], list[Word]]
@@ -83,6 +90,8 @@ class _RawRow:
     top: float | None  # None for table rows: they never participate in continuation joins
     fields: dict[str, str]
     raw_text: str
+    is_ocr: bool = False  # words carried a "conf" key - this row came from the OCR fallback
+    field_conf: dict[str, float] = field(default_factory=dict)  # min OCR conf per field name
 
 
 def _table_header(table: list[list[str | None]]) -> dict[int, str] | None:
@@ -129,7 +138,9 @@ def _group_lines(words: list[Word]) -> list[list[Word]]:
     return lines
 
 
-def _split_cells(line_words: list[Word]) -> list[tuple[float, str]]:
+def _split_cells(line_words: list[Word]) -> list[tuple[float, str, float | None]]:
+    """Groups a line's words into cells. The third element is the cell's minimum OCR
+    confidence (None for native-text words, which never carry a "conf" key)."""
     ordered = sorted(line_words, key=lambda w: w["x0"])
     cells: list[list[Word]] = []
     for word in ordered:
@@ -137,24 +148,34 @@ def _split_cells(line_words: list[Word]) -> list[tuple[float, str]]:
             cells[-1].append(word)
         else:
             cells.append([word])
-    return [(cell[0]["x0"], " ".join(w["text"] for w in cell)) for cell in cells]
+    result: list[tuple[float, str, float | None]] = []
+    for cell in cells:
+        confidences = [w["conf"] for w in cell if "conf" in w]
+        text = " ".join(w["text"] for w in cell)
+        result.append((cell[0]["x0"], text, min(confidences) if confidences else None))
+    return result
 
 
-def _header_columns(cells: list[tuple[float, str]]) -> list[tuple[float, str]] | None:
-    columns = [(x0, matched) for x0, text in cells if (matched := _match_header(text))]
+def _header_columns(
+    cells: list[tuple[float, str, float | None]],
+) -> list[tuple[float, str]] | None:
+    columns = [(x0, matched) for x0, text, _ in cells if (matched := _match_header(text))]
     if "date" not in {name for _, name in columns}:
         return None
     return columns
 
 
 def _assign_cells(
-    cells: list[tuple[float, str]], columns: list[tuple[float, str]]
-) -> dict[str, str]:
+    cells: list[tuple[float, str, float | None]], columns: list[tuple[float, str]]
+) -> tuple[dict[str, str], dict[str, float]]:
     fields: dict[str, str] = {}
-    for x0, text in cells:
+    field_conf: dict[str, float] = {}
+    for x0, text, conf in cells:
         _, name = min(columns, key=lambda column: abs(column[0] - x0))
         fields[name] = f"{fields[name]} {text}".strip() if name in fields else text
-    return fields
+        if conf is not None:
+            field_conf[name] = min(field_conf[name], conf) if name in field_conf else conf
+    return fields, field_conf
 
 
 def _word_rows(words: list[Word], page_number: int) -> tuple[list[_RawRow], float | None]:
@@ -177,8 +198,8 @@ def _word_rows(words: list[Word], page_number: int) -> tuple[list[_RawRow], floa
                 header_top = line[0]["top"]
             continue  # header line itself, or noise above it - never a data row
         position += 1
-        fields = _assign_cells(cells, columns)
-        raw_text = " | ".join(text for _, text in cells)
+        fields, field_conf = _assign_cells(cells, columns)
+        raw_text = " | ".join(text for _, text, _ in cells)
         rows.append(
             _RawRow(
                 source_page=page_number,
@@ -186,6 +207,8 @@ def _word_rows(words: list[Word], page_number: int) -> tuple[list[_RawRow], floa
                 top=line[0]["top"],
                 fields=fields,
                 raw_text=raw_text,
+                is_ocr=any("conf" in word for word in line),
+                field_conf=field_conf,
             )
         )
     return rows, header_top
@@ -325,7 +348,9 @@ def _resolve_amount(fields: dict[str, str]) -> _AmountResult:
     return _AmountResult()
 
 
-def _build_candidate(index: int, row: _RawRow, orphan: bool) -> CandidateTransaction:
+def _build_candidate(
+    index: int, row: _RawRow, orphan: bool, ocr_min_confidence: float
+) -> CandidateTransaction:
     fields = row.fields
     raw_fields = {name: value for name, value in fields.items() if value.strip()}
     raw_fields["raw_text"] = row.raw_text
@@ -338,7 +363,7 @@ def _build_candidate(index: int, row: _RawRow, orphan: bool) -> CandidateTransac
         source_format="pdf",
         source_page=row.source_page,
         source_line=row.position,
-        extraction_method="pdf",
+        extraction_method="ocr" if row.is_ocr else "pdf",
         raw_fields=raw_fields,
     )
     amount = _resolve_amount(fields)
@@ -353,6 +378,24 @@ def _build_candidate(index: int, row: _RawRow, orphan: bool) -> CandidateTransac
             "line has no date or amount and sits too far from the row above it to join",
             WARNING,
         )
+    if row.is_ocr:
+        candidate.add_issue(
+            OCR_EXTRACTED,
+            "this row was read by OCR, not native PDF text - confirm it before committing",
+            WARNING,
+        )
+        unsure = [
+            name
+            for name in _OCR_CRITICAL_FIELDS
+            if row.field_conf.get(name, 100.0) < ocr_min_confidence
+        ]
+        if unsure:
+            candidate.add_issue(
+                OCR_LOW_CONFIDENCE,
+                f"OCR confidence below {ocr_min_confidence:.0f}% in {', '.join(unsure)}; "
+                "confirm the correct value or exclude this row before committing",
+                ERROR,
+            )
     return candidate
 
 
@@ -367,6 +410,7 @@ class PdfStatementExtractor:
         max_pdf_pages: int | None = None,
         max_candidate_rows: int | None = None,
         word_provider: WordProvider | None = None,
+        ocr_min_confidence: float | None = None,
     ) -> None:
         self._max_pages = (
             max_pdf_pages if max_pdf_pages is not None else get_settings().max_pdf_pages
@@ -375,6 +419,11 @@ class PdfStatementExtractor:
             max_candidate_rows if max_candidate_rows is not None else _DEFAULT_MAX_CANDIDATE_ROWS
         )
         self._word_provider = word_provider or _native_words
+        self._ocr_min_confidence = (
+            ocr_min_confidence
+            if ocr_min_confidence is not None
+            else get_settings().ocr_min_confidence
+        )
 
     def extract(self, source: StatementSource) -> ExtractionResult:
         result = ExtractionResult(extractor=self.name)
@@ -415,7 +464,7 @@ class PdfStatementExtractor:
             kept.extend(_merge_continuations(page_rows, header_top))
 
         candidates = [
-            _build_candidate(index, row, orphan)
+            _build_candidate(index, row, orphan, self._ocr_min_confidence)
             for index, (row, orphan) in enumerate(kept, start=1)
         ]
         if len(candidates) > self._max_rows:
