@@ -47,11 +47,17 @@ from .candidates import (
 )
 from .extractors.csv import CsvStatementExtractor
 from .extractors.ocr import OcrFallbackPdfExtractor
+from .extractors.pdf import clean_amount_text
 
 logger = logging.getLogger("pfa")
 
 # Batches in these statuses still hold candidate rows and are subject to the TTL.
 _LIVE_STATUSES = ("preview_ready", "blocked")
+
+# How to read a positive figure in the statement's single amount column. Never inferred
+# from the data: an all-positive statement is genuinely ambiguous between a credit card
+# and a month with no refunds, so the user states the convention before committing.
+AMOUNT_SIGN_CONVENTIONS = ("as_written", "debit_positive")
 
 
 @dataclass(slots=True)
@@ -59,6 +65,7 @@ class BatchPatch:
     account: str | None = None
     excluded_candidate_ids: list[str] | None = None
     amount_mode: str | None = None
+    amount_sign: str | None = None
 
 
 def _now() -> datetime:
@@ -239,6 +246,30 @@ def _resolve_ambiguous_amount(candidate: CandidateTransaction, mode: str) -> Non
     candidate.issues = [issue for issue in candidate.issues if issue.code != AMBIGUOUS_SIGN]
 
 
+def _apply_amount_sign(candidate: CandidateTransaction, convention: str) -> None:
+    """Re-reads a row's flow direction from its single amount column under the statement's
+    sign convention. A credit-card export writes a purchase as a positive figure, which
+    `as_written` books as income.
+
+    The direction is re-derived from the raw text rather than flipped, so sending a
+    convention twice - or switching back - always lands on the same answer. Rows whose
+    source stated the direction in its own debit/credit column are left alone: their
+    convention is not in doubt, and the extractor already resolved it.
+    """
+    if candidate.direction is None:
+        return
+    if "debit" in candidate.raw_fields or "credit" in candidate.raw_fields:
+        return
+    amount = candidate.raw_fields.get("amount", "")
+    if not amount.strip():
+        return
+    _, negative = clean_amount_text(amount)
+    if convention == "debit_positive":
+        candidate.direction = "credit" if negative else "debit"
+    else:
+        candidate.direction = "debit" if negative else "credit"
+
+
 def apply_patch(uow: UnitOfWork, batch_id: str, patch: BatchPatch) -> ImportBatchModel:
     batch = load_batch(uow, batch_id)
     if batch.status != "preview_ready":
@@ -263,6 +294,11 @@ def apply_patch(uow: UnitOfWork, batch_id: str, patch: BatchPatch) -> ImportBatc
 
     service = ImportService(uow)
     service.validate(candidates)
+    if patch.amount_sign is not None and patch.amount_sign in AMOUNT_SIGN_CONVENTIONS:
+        for candidate in candidates:
+            # After validate (which sets direction) and before duplicate resolution, whose
+            # fingerprint covers the signed amount.
+            _apply_amount_sign(candidate, patch.amount_sign)
     service.resolve_duplicates(candidates)
 
     batch.candidates_json = candidates_to_json(candidates)
@@ -293,7 +329,9 @@ def commit_batch(uow: UnitOfWork, batch_id: str, settings: Settings) -> ImportBa
     batch.status = "committed"
     batch.committed_at = _now()
     batch.committed_transaction_ids_json = json.dumps([t.id for t in committed])
-    batch.candidates_json = candidates_to_json(candidates)
+    # Privacy boundary: staged rows are dropped once they are in the ledger, same as on
+    # expiry. The counts and the committed transaction ids are the surviving receipt.
+    batch.candidates_json = None
     counts = _counts(candidates)
     counts["imported"] = len(committed)
     batch.counts_json = json.dumps(counts)

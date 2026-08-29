@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import date, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
@@ -122,7 +122,9 @@ class ImportBatchResponse(BaseModel):
 class ImportBatchPatchRequest(BaseModel):
     account: str | None = None
     excluded_candidate_ids: list[str] | None = None
-    amount_mode: str | None = None
+    # Both are closed sets: an unrecognised value is a 422, not a silent no-op.
+    amount_mode: Literal["debit", "credit"] | None = None
+    amount_sign: Literal["as_written", "debit_positive"] | None = None
 
 
 class ScenarioRequest(BaseModel):
@@ -315,6 +317,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     account=request.account,
                     excluded_candidate_ids=request.excluded_candidate_ids,
                     amount_mode=request.amount_mode,
+                    amount_sign=request.amount_sign,
                 ),
             )
             response = _batch_response(batch)

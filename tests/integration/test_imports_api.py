@@ -425,3 +425,84 @@ def test_malformed_content_length_does_not_500(tmp_path) -> None:
         )
     # Starlette may reject the framing itself; what must not happen is a 500 from int().
     assert response.status_code != 500
+
+
+def _amex_csv_bytes() -> bytes:
+    """A credit-card export: unsigned positives, where a purchase is money out."""
+    return (
+        b"date,description,amount,account\n"
+        b"2026-08-19,AMZN MKTPLACE,25.92,Amex\n"
+        b"2026-08-19,MARYLEBONE STATION,7.00,Amex\n"
+        b"2026-08-21,PAYMENT RECEIVED THANK YOU,-150.00,Amex\n"
+    )
+
+
+def test_unsigned_credit_card_csv_is_never_silently_booked_as_income(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        body = _upload(client, _amex_csv_bytes(), filename="amex.csv").json()
+        batch_id = body["id"]
+
+        # Default: the amounts stand as written. Wrong for this statement, but stated, not
+        # guessed - and visible in the preview before anything is committed.
+        assert [c["direction"] for c in body["candidates"]] == ["credit", "credit", "debit"]
+
+        patched = client.patch(f"/imports/{batch_id}", json={"amount_sign": "debit_positive"})
+        assert patched.status_code == 200
+        assert [c["direction"] for c in patched.json()["candidates"]] == [
+            "debit",
+            "debit",
+            "credit",
+        ]
+
+        # Idempotent, and reversible: re-sending never double-flips.
+        again = client.patch(f"/imports/{batch_id}", json={"amount_sign": "debit_positive"})
+        assert [c["direction"] for c in again.json()["candidates"]] == ["debit", "debit", "credit"]
+        back = client.patch(f"/imports/{batch_id}", json={"amount_sign": "as_written"})
+        assert [c["direction"] for c in back.json()["candidates"]] == ["credit", "credit", "debit"]
+
+        client.patch(f"/imports/{batch_id}", json={"amount_sign": "debit_positive"})
+        # An unrelated later patch must not undo the convention.
+        client.patch(f"/imports/{batch_id}", json={"account": "Amex"})
+        client.post(f"/imports/{batch_id}/commit")
+
+        transactions = client.get("/transactions").json()
+        by_description = {t["description"]: t for t in transactions}
+        assert by_description["AMZN MKTPLACE"]["flow_direction"] == "debit"
+        assert by_description["MARYLEBONE STATION"]["flow_direction"] == "debit"
+        assert by_description["PAYMENT RECEIVED THANK YOU"]["flow_direction"] == "credit"
+
+
+def test_two_column_statements_ignore_the_amount_sign_convention(tmp_path) -> None:
+    """A source that states the direction in its own columns is not in doubt."""
+    settings = _settings(tmp_path)
+    csv_bytes = (
+        b"date,description,paid out,paid in,account\n"
+        b"2026-08-01,Salary,,2000.00,Main account\n"
+        b"2026-08-02,Coffee Shop,3.50,,Main account\n"
+    )
+    with TestClient(create_app(settings)) as client:
+        batch_id = _upload(client, csv_bytes).json()["id"]
+        patched = client.patch(f"/imports/{batch_id}", json={"amount_sign": "debit_positive"})
+        assert [c["direction"] for c in patched.json()["candidates"]] == ["credit", "debit"]
+
+
+def test_unknown_amount_mode_is_rejected_rather_than_ignored(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        batch_id = _upload(client, _csv_bytes()).json()["id"]
+        rejected = client.patch(f"/imports/{batch_id}", json={"amount_mode": "sideways"})
+        assert rejected.status_code == 422
+
+
+def test_committing_drops_the_staged_rows(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        batch_id = _upload(client, _csv_bytes()).json()["id"]
+        committed = client.post(f"/imports/{batch_id}/commit").json()
+        assert committed["counts"]["imported"] == 3
+        assert committed["candidates"] == []
+
+        fetched = client.get(f"/imports/{batch_id}").json()
+        assert fetched["candidates"] == []
+        assert len(fetched["committed_transaction_ids"]) == 3
