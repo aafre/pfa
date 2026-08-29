@@ -35,6 +35,7 @@ from pfa.ingestion.candidates import (
     CandidateTransaction,
     ExtractionResult,
     StatementSource,
+    match_header_alias,
 )
 
 # ponytail: max_candidate_rows is T3's setting (src/pfa/config.py, landing in a parallel
@@ -42,16 +43,6 @@ from pfa.ingestion.candidates import (
 # get_settings().max_candidate_rows once it exists.
 _DEFAULT_MAX_CANDIDATE_ROWS = 10_000
 
-# Header aliases are matched verbatim (lowercased, whitespace-collapsed) - no fuzzy guessing.
-_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
-    "date": ("date",),
-    "description": ("description", "details", "narrative"),
-    "debit": ("debit", "paid out", "withdrawn"),
-    "credit": ("credit", "paid in", "received"),
-    "amount": ("amount", "value"),
-    "balance": ("balance",),
-    "reference": ("reference", "transaction id"),
-}
 _AMOUNT_FIELDS = ("amount", "debit", "credit")
 _DATE_PATTERNS = ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%m/%d/%Y")
 
@@ -75,14 +66,6 @@ def _native_words(page: Page) -> list[Word]:
     return page.extract_words()
 
 
-def _match_header(cell_text: str) -> str | None:
-    normalized = " ".join(cell_text.strip().lower().split())
-    for field_name, aliases in _HEADER_ALIASES.items():
-        if normalized in aliases:
-            return field_name
-    return None
-
-
 def _has_transaction_header_fields(names: set[str]) -> bool:
     return "date" in names and bool(names.intersection(_AMOUNT_FIELDS))
 
@@ -103,7 +86,7 @@ class _RawRow:
 def _table_header(table: list[list[str | None]]) -> dict[int, str] | None:
     mapping: dict[int, str] = {}
     for index, cell in enumerate(table[0]):
-        matched = _match_header(cell or "")
+        matched = match_header_alias(cell or "")
         if matched:
             mapping[index] = matched
     return mapping if _has_transaction_header_fields(set(mapping.values())) else None
@@ -165,7 +148,7 @@ def _split_cells(line_words: list[Word]) -> list[tuple[float, str, float | None]
 def _header_columns(
     cells: list[tuple[float, str, float | None]],
 ) -> list[tuple[float, str]] | None:
-    columns = [(x0, matched) for x0, text, _ in cells if (matched := _match_header(text))]
+    columns = [(x0, matched) for x0, text, _ in cells if (matched := match_header_alias(text))]
     names = {name for _, name in columns}
     if not _has_transaction_header_fields(names):
         return None

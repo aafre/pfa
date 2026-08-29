@@ -173,3 +173,31 @@ def test_headerless_csv_returns_a_parser_error_without_mutation(tmp_path) -> Non
     assert uow.accounts.all() == []
     uow.session.close()
     engine.dispose()
+
+
+def test_headerless_export_imports_every_row_with_the_signs_it_was_written_with(tmp_path) -> None:
+    path = tmp_path / "hsbc.csv"
+    path.write_text(
+        "14/08/2025,COFFEE HOUSE LONDON GB,-14.38\n"
+        "13/08/2025,NEWSAGENT LEEDS GB,-1.95\n"
+        "12/08/2025,SALARY PAYMENT,2500.00\n",
+        encoding="utf-8",
+    )
+    engine, uow, _ = services()
+
+    result = ImportService(uow).import_csv(path)
+
+    assert (result.imported, result.errors) == (3, [])
+    ledger = sorted(uow.transactions.all(), key=lambda row: row.transaction_date)
+    assert [row.transaction_date for row in ledger] == [
+        date(2025, 8, 12),
+        date(2025, 8, 13),
+        date(2025, 8, 14),
+    ]
+    assert [(row.amount_minor, row.flow_direction) for row in ledger] == [
+        (250_000, "credit"),
+        (195, "debit"),
+        (1_438, "debit"),
+    ]
+    uow.session.close()
+    engine.dispose()

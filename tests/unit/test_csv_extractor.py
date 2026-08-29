@@ -143,3 +143,49 @@ def test_non_utf8_bytes_fail_with_an_actionable_batch_issue(tmp_path) -> None:
     assert result.candidates == []
     assert result.issues[0].code == codes.UNREADABLE_FILE
     assert "UTF-8" in result.issues[0].message
+
+
+def test_headerless_export_is_read_positionally_and_says_so(tmp_path) -> None:
+    path = tmp_path / "hsbc.csv"
+    path.write_text(
+        "14/08/2025,COFFEE HOUSE LONDON GB,-14.38\n"
+        "13/08/2025,NEWSAGENT LEEDS GB,-1.95\n"
+        "12/08/2025,SALARY PAYMENT,2500.00\n",
+        encoding="utf-8",
+    )
+
+    result = extract(path)
+
+    # The top line is a real purchase; DictReader used to swallow it as the column names.
+    assert [row.transaction_date for row in result.candidates] == [
+        "14/08/2025",
+        "13/08/2025",
+        "12/08/2025",
+    ]
+    assert result.candidates[0].raw_description == "COFFEE HOUSE LONDON GB"
+    assert [row.raw_fields["amount"] for row in result.candidates] == ["-14.38", "-1.95", "2500.00"]
+    assert [row.source_line for row in result.candidates] == [1, 2, 3]
+    assert [(issue.code, issue.severity) for issue in result.issues] == [
+        (codes.HEADERLESS_CSV, codes.WARNING)
+    ]
+    assert "date, description, amount" in result.issues[0].message
+
+
+def test_an_unusual_but_genuine_header_is_never_mistaken_for_data(tmp_path) -> None:
+    path = tmp_path / "unusual.csv"
+    path.write_text("Txn Date Col,What It Was,How Much\n2026-08-01,Tesco,-5\n", encoding="utf-8")
+
+    result = extract(path)
+
+    assert result.issues == []
+    assert len(result.candidates) == 1
+
+
+def test_a_three_column_numeric_table_is_not_assumed_headerless(tmp_path) -> None:
+    path = tmp_path / "numbers.csv"
+    path.write_text("1,2,3\n4,5,6\n", encoding="utf-8")
+
+    result = extract(path)
+
+    assert [issue.code for issue in result.issues] == []
+    assert [row.transaction_date for row in result.candidates] == [None]

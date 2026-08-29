@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
@@ -11,7 +9,6 @@ from typing import Protocol
 from pfa.db.models import MerchantRuleModel, TransactionModel
 from pfa.db.unit_of_work import UnitOfWork
 from pfa.domain.errors import ImportRowError
-from pfa.domain.money import Money
 from pfa.domain.transactions import (
     ClassificationSource,
     SpendingCategory,
@@ -34,6 +31,8 @@ from .candidates import (
     CandidateTransaction,
     ExtractionResult,
     StatementSource,
+    parse_amount,
+    parse_date,
 )
 from .categorizer import Classification, classify_known
 from .extractors.csv import CsvStatementExtractor
@@ -51,24 +50,6 @@ class ImportResult:
     duplicates: int = 0
     requires_classification: int = 0
     errors: list[str] = field(default_factory=list)
-
-
-def _parse_date(value: str) -> date:
-    for pattern in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%m/%d/%Y"):
-        try:
-            return datetime.strptime(value, pattern).date()
-        except ValueError:
-            continue
-    raise ImportRowError(f"invalid date {value!r}")
-
-
-def _parse_amount(value: str) -> tuple[int, int]:
-    try:
-        decimal = Decimal(value.replace(",", "").replace("£", "").strip())
-    except InvalidOperation as exc:
-        raise ImportRowError(f"invalid amount {value!r}") from exc
-    sign = -1 if decimal < 0 else 1
-    return sign, Money.from_major(abs(decimal)).minor
 
 
 def _non_member(value: str, enum: type[StrEnum]) -> str | None:
@@ -122,7 +103,7 @@ def _classification_from_rule(rule: MerchantRuleModel) -> Classification:
 
 def _validate_candidate(candidate: CandidateTransaction) -> None:
     try:
-        _parse_date(candidate.transaction_date or "")
+        parse_date(candidate.transaction_date or "")
     except ImportRowError as exc:
         candidate.add_issue(INVALID_DATE, str(exc))
         return
@@ -131,7 +112,7 @@ def _validate_candidate(candidate: CandidateTransaction) -> None:
         return
     if candidate.amount_minor is None:
         try:
-            sign, amount_minor = _parse_amount(candidate.raw_fields.get("amount", ""))
+            sign, amount_minor = parse_amount(candidate.raw_fields.get("amount", ""))
         except ImportRowError as exc:
             candidate.add_issue(INVALID_AMOUNT, str(exc))
             return
@@ -146,7 +127,7 @@ def _validate_candidate(candidate: CandidateTransaction) -> None:
         return
     if candidate.posted_date:
         try:
-            _parse_date(candidate.posted_date)
+            parse_date(candidate.posted_date)
         except ImportRowError as exc:
             candidate.add_issue(INVALID_DATE, str(exc))
             return
@@ -229,8 +210,8 @@ class ImportService:
             transaction = TransactionModel(
                 external_id=candidate.external_id,
                 account_id=account.id,
-                transaction_date=_parse_date(candidate.transaction_date or ""),
-                posted_date=_parse_date(candidate.posted_date) if candidate.posted_date else None,
+                transaction_date=parse_date(candidate.transaction_date or ""),
+                posted_date=parse_date(candidate.posted_date) if candidate.posted_date else None,
                 raw_description=candidate.raw_description,
                 normalized_description=candidate.normalized_description,
                 merchant=merchant_from_description(candidate.raw_description),
