@@ -98,3 +98,26 @@ def test_import_batches_migration_adds_and_removes_only_its_own_table(tmp_path) 
     assert "import_batches" not in tables_after_downgrade
     assert tables_after_downgrade == tables_before
     engine.dispose()
+
+
+def test_amount_sign_migration_adds_and_removes_only_its_own_column(tmp_path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'amount_sign.db'}"
+    migrate(database_url, "0002_import_batches")
+    engine = make_engine(Settings(database_url=database_url))
+    columns_before = {c["name"] for c in inspect(engine).get_columns("import_batches")}
+    assert "amount_sign" not in columns_before
+    engine.dispose()
+
+    migrate(database_url, "0003_batch_amount_sign")
+    engine = make_engine(Settings(database_url=database_url))
+    columns = {c["name"]: c for c in inspect(engine).get_columns("import_batches")}
+    assert set(columns) == columns_before | {"amount_sign"}
+    assert columns["amount_sign"]["nullable"]
+    engine.dispose()
+
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.downgrade(config, "0002_import_batches")
+    engine = make_engine(Settings(database_url=database_url))
+    assert {c["name"] for c in inspect(engine).get_columns("import_batches")} == columns_before
+    engine.dispose()
