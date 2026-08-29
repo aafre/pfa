@@ -1,4 +1,4 @@
-# PFA — Personal Finance Agent
+# Personal Finance Agent (PFA)
 
 > Local-first personal finance intelligence: deterministic Python/SQLite calculations, optional local Ollama explanations, and browser/CLI statement import.
 
