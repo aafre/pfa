@@ -546,7 +546,7 @@ function renderCandidatesTable() {
   }
 
   tbody.innerHTML = filtered.map((c) => {
-    const isOutflow = c.direction === "outflow";
+    const isDebit = c.direction === "debit";
     const amountStr = formatMoney(c.amount_minor, c.currency);
     const issues = c.issues || [];
     const issueHtml = issues.map((i) => `<span class="issue-badge issue-warning" title="${i.message}">${i.code}</span>`).join(" ");
@@ -563,8 +563,8 @@ function renderCandidatesTable() {
           <small>${c.raw_description}</small>
         </td>
         <td><span class="category-tag">${prettyCategory(c.category)}</span></td>
-        <td class="candidate-amount ${isOutflow ? "is-outflow" : "is-inflow"}">
-          ${isOutflow ? `−${amountStr}` : `+${amountStr}`}
+        <td class="candidate-amount ${isDebit ? "is-outflow" : "is-inflow"}">
+          ${isDebit ? `−${amountStr}` : `+${amountStr}`}
         </td>
         <td>
           <span class="meta-chip">${c.extraction_method || "table"}</span>
@@ -763,7 +763,7 @@ function renderActivityView() {
   }
 
   tbody.innerHTML = filtered.map((t) => {
-    const isOutflow = t.flow_direction === "outflow";
+    const isDebit = t.flow_direction === "debit";
     const amountStr = formatMoney(t.amount_minor, t.currency);
     const sourceClass = t.classification_source === "rule" ? "tag-deterministic" : t.classification_source === "model" ? "tag-model" : "tag-import";
 
@@ -774,8 +774,8 @@ function renderActivityView() {
         <td>${t.merchant || "—"}</td>
         <td><span class="category-tag">${prettyCategory(t.category)}</span></td>
         <td><span class="provenance-tag ${sourceClass}">${t.classification_source || "rule"}</span></td>
-        <td class="ledger-amount ${isOutflow ? "is-outflow" : "is-inflow"}">
-          ${isOutflow ? `−${amountStr}` : `+${amountStr}`}
+        <td class="ledger-amount ${isDebit ? "is-outflow" : "is-inflow"}">
+          ${isDebit ? `−${amountStr}` : `+${amountStr}`}
         </td>
       </tr>
     `;
