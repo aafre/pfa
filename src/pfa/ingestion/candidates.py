@@ -1,15 +1,22 @@
 """Format-neutral extraction contracts shared by extractors, services and the API.
 
-Pure data: nothing here may import a parsing library or the ORM, so library objects
-never cross the extractor boundary.
+Nothing here may import a parsing library or the ORM, so library objects never cross the
+extractor boundary. The header table and the two field parsers live here for the same
+reason the issue codes do: every extractor needs them, and a vocabulary that is only
+half-shared is a vocabulary the two extractors will drift apart on.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Protocol
+
+from pfa.domain.errors import ImportRowError
+from pfa.domain.money import Money
 
 ERROR = "error"
 WARNING = "warning"
@@ -30,6 +37,7 @@ OCR_EXTRACTED = "OCR_EXTRACTED"  # warning: row came from OCR, not native text -
 
 # Batch-level issue codes.
 NO_HEADER_ROW = "NO_HEADER_ROW"
+HEADERLESS_CSV = "HEADERLESS_CSV"  # warning: no header row, columns were read by position
 UNREADABLE_FILE = "UNREADABLE_FILE"
 PDF_ENCRYPTED = "PDF_ENCRYPTED"
 PDF_TOO_MANY_PAGES = "PDF_TOO_MANY_PAGES"
@@ -50,6 +58,47 @@ BATCH_EXPIRED = "BATCH_EXPIRED"
 BATCH_NOT_EDITABLE = "BATCH_NOT_EDITABLE"
 BATCH_HAS_BLOCKING_ERRORS = "BATCH_HAS_BLOCKING_ERRORS"
 BATCH_ALREADY_COMMITTED = "BATCH_ALREADY_COMMITTED"
+
+
+# One header vocabulary for every extractor. A bank's wording is added once, here, rather
+# than in whichever extractor happened to meet that bank first. Cells match verbatim once
+# lowercased and whitespace-collapsed - the spec forbids fuzzy guessing.
+HEADER_ALIASES: dict[str, tuple[str, ...]] = {
+    "date": ("date", "transaction date", "transaction_date"),
+    "description": ("description", "details", "narrative", "merchant"),
+    "debit": ("debit", "paid out", "paid_out", "withdrawn", "money out", "money_out"),
+    "credit": ("credit", "paid in", "paid_in", "received", "money in", "money_in"),
+    "amount": ("amount", "value"),
+    "balance": ("balance",),
+    "reference": ("reference", "transaction id"),
+}
+
+
+def match_header_alias(cell_text: str) -> str | None:
+    """Maps one header cell onto its canonical field name, or None if nothing matches."""
+    normalized = " ".join(cell_text.strip().lower().split())
+    for field_name, aliases in HEADER_ALIASES.items():
+        if normalized in aliases:
+            return field_name
+    return None
+
+
+def parse_date(value: str) -> date:
+    for pattern in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(value, pattern).date()
+        except ValueError:
+            continue
+    raise ImportRowError(f"invalid date {value!r}")
+
+
+def parse_amount(value: str) -> tuple[int, int]:
+    try:
+        decimal = Decimal(value.replace(",", "").replace("£", "").strip())
+    except InvalidOperation as exc:
+        raise ImportRowError(f"invalid amount {value!r}") from exc
+    sign = -1 if decimal < 0 else 1
+    return sign, Money.from_major(abs(decimal)).minor
 
 
 @dataclass(frozen=True, slots=True)

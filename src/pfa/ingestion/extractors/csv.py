@@ -1,23 +1,34 @@
 from __future__ import annotations
 
 import csv
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from pfa.domain.errors import ImportRowError
 from pfa.ingestion.candidates import (
     AMBIGUOUS_SIGN,
+    HEADER_ALIASES,
+    HEADERLESS_CSV,
     NO_HEADER_ROW,
     UNREADABLE_FILE,
+    WARNING,
     CandidateIssue,
     CandidateTransaction,
     ExtractionResult,
     StatementSource,
+    match_header_alias,
+    parse_amount,
+    parse_date,
 )
 
-DEBIT_ALIASES = ("debit", "paid out", "paid_out", "withdrawn", "money out", "money_out")
-CREDIT_ALIASES = ("credit", "paid in", "paid_in", "received", "money in", "money_in")
-AMOUNT_ALIASES = ("amount", "value")
+DATE_ALIASES = HEADER_ALIASES["date"]
+DESCRIPTION_ALIASES = HEADER_ALIASES["description"]
+DEBIT_ALIASES = HEADER_ALIASES["debit"]
+CREDIT_ALIASES = HEADER_ALIASES["credit"]
+AMOUNT_ALIASES = HEADER_ALIASES["amount"]
+
+# The order assumed for a file that has no header row at all.
+POSITIONAL_COLUMNS = ("date", "description", "amount")
 
 
 def _value(row: dict[str, str], *names: str) -> str:
@@ -37,21 +48,57 @@ def _delimiter(path: Path) -> str:
         return ","
 
 
+def _parses(value: str, parse: Callable[[str], object]) -> bool:
+    try:
+        parse(value)
+    except ImportRowError:
+        return False
+    return True
+
+
+def _is_headerless(cells: list[str]) -> bool:
+    """True when the row DictReader took for a header is really the first transaction.
+
+    HSBC exports ship no header at all, so the first purchase is eaten as the column names
+    and every remaining row then fails validation. The test has to be narrow enough that a
+    genuine header with unusual wording never trips it, so it demands three things at once:
+    not one cell resembles a known column name, the row has exactly the positional shape,
+    and its outer cells actually parse as a date and an amount. A description that parses as
+    a number is rejected too - that is a numeric table, not a statement.
+    """
+    if len(cells) != len(POSITIONAL_COLUMNS):
+        return False
+    if any(match_header_alias(cell) for cell in cells):
+        return False
+    date_cell, description_cell, amount_cell = cells
+    return (
+        _parses(date_cell, parse_date)
+        and bool(description_cell.strip())
+        and not _parses(description_cell, parse_amount)
+        and _parses(amount_cell, parse_amount)
+    )
+
+
 def read_csv_rows(path: Path) -> Iterator[dict[str, str]]:
+    delimiter = _delimiter(path)
     with path.open(newline="", encoding="utf-8-sig") as handle:
-        reader = csv.DictReader(handle, delimiter=_delimiter(path))
+        reader = csv.DictReader(handle, delimiter=delimiter)
         if not reader.fieldnames:
             raise ImportRowError("CSV has no header row")
-        columns = {str(name).strip().lower() for name in reader.fieldnames}
+        headerless = _is_headerless([str(name) for name in reader.fieldnames])
+        if headerless:
+            handle.seek(0)  # the first line is data, so read the whole file again
+            reader = csv.DictReader(handle, fieldnames=POSITIONAL_COLUMNS, delimiter=delimiter)
+        columns = {str(name).strip().lower() for name in reader.fieldnames or ()}
         two_column = not columns.intersection(AMOUNT_ALIASES) and bool(
             columns.intersection(DEBIT_ALIASES + CREDIT_ALIASES)
         )
         for raw in reader:
             row = {str(key).strip().lower(): (value or "") for key, value in raw.items()}
             yield {
-                "date": _value(row, "date", "transaction_date", "transaction date"),
+                "date": _value(row, *DATE_ALIASES),
                 "posted_date": _value(row, "posted_date", "posted date"),
-                "description": _value(row, "description", "details", "narrative", "merchant"),
+                "description": _value(row, *DESCRIPTION_ALIASES),
                 "amount": _value(row, *AMOUNT_ALIASES),
                 "debit": _value(row, *DEBIT_ALIASES),
                 "credit": _value(row, *CREDIT_ALIASES),
@@ -63,6 +110,7 @@ def read_csv_rows(path: Path) -> Iterator[dict[str, str]]:
                 "external_id": _value(row, "external_id", "id", "transaction_id", "transaction id"),
                 "_line": str(reader.line_num),
                 "_mode": "debit_credit" if two_column else "amount",
+                "_positional": "1" if headerless else "",
             }
 
 
@@ -113,14 +161,26 @@ class CsvStatementExtractor:
 
     def extract(self, source: StatementSource) -> ExtractionResult:
         result = ExtractionResult(extractor=self.name)
+        positional = False
         try:
             for index, row in enumerate(read_csv_rows(source.path), start=1):
+                positional = positional or bool(row["_positional"])
                 result.candidates.append(_candidate(f"c{index}", row))
         except ImportRowError as exc:
             result.issues.append(CandidateIssue(NO_HEADER_ROW, str(exc)))
         except UnicodeDecodeError:
             result.issues.append(
                 CandidateIssue(UNREADABLE_FILE, "file is not UTF-8 text; export it as UTF-8 CSV")
+            )
+        if positional:
+            result.issues.append(
+                CandidateIssue(
+                    HEADERLESS_CSV,
+                    "no header row was found; columns were read in order as "
+                    + ", ".join(POSITIONAL_COLUMNS)
+                    + " - check the preview before committing",
+                    WARNING,
+                )
             )
         currencies = {candidate.currency for candidate in result.candidates}
         accounts = {candidate.account_hint for candidate in result.candidates}

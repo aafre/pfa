@@ -52,6 +52,8 @@ coverage.xml
 .uv-cache/
 data/*.db
 data/*.db-*
+# Staged upload bytes: a real bank statement must never be committable.
+data/uploads/
 .env
 .pytest_cache/
 cover/

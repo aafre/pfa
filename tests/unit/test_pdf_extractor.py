@@ -262,3 +262,19 @@ def test_no_recognizable_rows_reports_pdf_not_extractable_with_actionable_copy(
     message = result.issues[0].message.lower()
     assert "csv" in message
     assert result.candidates == []
+
+
+def test_money_out_and_money_in_headers_are_recognised(tmp_path: Path) -> None:
+    # Monzo, Starling and Lloyds all label their columns this way. The CSV extractor has
+    # always known the wording; the PDF map did not, until both read one shared table.
+    columns = [72.0, 160.0, 320.0, 420.0]
+    rows = [
+        ["Date", "Description", "Money Out", "Money In"],
+        ["2026-08-01", "Tesco Metro", "12.50", ""],
+        ["2026-08-02", "Salary", "", "3000.00"],
+    ]
+    result = _extract(tmp_path, [statement_page(rows, columns)])
+
+    assert result.issues == []
+    assert [c.amount_minor for c in result.candidates] == [1250, 300000]
+    assert [c.direction for c in result.candidates] == ["debit", "credit"]
