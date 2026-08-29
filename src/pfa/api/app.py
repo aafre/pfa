@@ -104,6 +104,7 @@ class ImportBatchResponse(BaseModel):
     sha256: str
     extractor: str
     destination_account: str | None
+    amount_sign: str | None
     detected_account: str | None
     detected_currency: str | None
     statement_start: date | None
@@ -174,6 +175,7 @@ def _batch_response(batch: ImportBatchModel) -> ImportBatchResponse:
         sha256=batch.sha256,
         extractor=batch.extractor,
         destination_account=batch.destination_account,
+        amount_sign=batch.amount_sign,
         detected_account=batch.detected_account,
         detected_currency=batch.detected_currency,
         statement_start=batch.statement_start,

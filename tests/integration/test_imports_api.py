@@ -506,3 +506,43 @@ def test_committing_drops_the_staged_rows(tmp_path) -> None:
         fetched = client.get(f"/imports/{batch_id}").json()
         assert fetched["candidates"] == []
         assert len(fetched["committed_transaction_ids"]) == 3
+
+
+def test_amount_sign_is_persisted_and_survives_a_refresh_and_later_patches(tmp_path) -> None:
+    """Without a stored convention the browser cannot restore its own sign selector, and a
+    committed batch keeps no record of how it read its amounts.
+    """
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        body = _upload(client, _amex_csv_bytes(), filename="amex.csv").json()
+        batch_id = body["id"]
+        assert body["amount_sign"] is None
+
+        patched = client.patch(f"/imports/{batch_id}", json={"amount_sign": "debit_positive"})
+        assert patched.json()["amount_sign"] == "debit_positive"
+        assert client.get(f"/imports/{batch_id}").json()["amount_sign"] == "debit_positive"
+
+        # An unrelated patch neither drops the convention nor reverts the directions.
+        excluded_id = body["candidates"][0]["candidate_id"]
+        later = client.patch(
+            f"/imports/{batch_id}",
+            json={"account": "Amex", "excluded_candidate_ids": [excluded_id]},
+        )
+        later_body = later.json()
+        assert later_body["amount_sign"] == "debit_positive"
+        assert [c["direction"] for c in later_body["candidates"]] == ["debit", "debit", "credit"]
+
+        # Switching back is recorded too, and lands on the original directions.
+        back = client.patch(f"/imports/{batch_id}", json={"amount_sign": "as_written"})
+        assert back.json()["amount_sign"] == "as_written"
+        assert [c["direction"] for c in back.json()["candidates"]] == ["credit", "credit", "debit"]
+        client.patch(f"/imports/{batch_id}", json={"amount_sign": "debit_positive"})
+
+    # A fresh app over the same database: the selector has something to restore from.
+    with TestClient(create_app(_settings_reuse(settings))) as fresh_client:
+        assert fresh_client.get(f"/imports/{batch_id}").json()["amount_sign"] == "debit_positive"
+        committed = fresh_client.post(f"/imports/{batch_id}/commit").json()
+        # The staged rows are gone; the convention they were read under is the receipt.
+        assert committed["candidates"] == []
+        assert committed["amount_sign"] == "debit_positive"
+        assert fresh_client.get(f"/imports/{batch_id}").json()["amount_sign"] == "debit_positive"

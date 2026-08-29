@@ -97,6 +97,9 @@ class ImportBatchModel(Base):
     extractor: Mapped[str] = mapped_column(String(60))
     status: Mapped[str] = mapped_column(String(20), index=True)
     destination_account: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # The sign convention the user declared for this source, kept so the preview can be
+    # rebuilt after a refresh and so a committed batch records how it read its amounts.
+    amount_sign: Mapped[str | None] = mapped_column(String(20), nullable=True)
     detected_account: Mapped[str | None] = mapped_column(String(120), nullable=True)
     detected_currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
     statement_start: Mapped[date | None] = mapped_column(Date, nullable=True)
