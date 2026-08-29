@@ -1,0 +1,223 @@
+from datetime import UTC, datetime, timedelta
+
+from alembic import command
+from alembic.config import Config
+from fastapi.testclient import TestClient
+
+from pfa.api.app import create_app
+from pfa.config import Settings
+from pfa.db.engine import make_engine, make_session_factory
+from pfa.db.models import ImportBatchModel
+from pfa.db.repositories import TransactionRepository
+
+
+def _settings(tmp_path, **overrides) -> Settings:
+    database_url = f"sqlite:///{tmp_path / 'pfa.db'}"
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "head")
+    return Settings(database_url=database_url, upload_dir=tmp_path / "uploads", **overrides)
+
+
+def _csv_bytes(rows: str = "") -> bytes:
+    header = "date,description,amount,account\n"
+    body = rows or (
+        "2026-08-01,Salary,2000,Main account\n"
+        "2026-08-02,Coffee Shop,-350,Main account\n"
+        "2026-08-03,Rent,-900,Main account\n"
+    )
+    return (header + body).encode("utf-8")
+
+
+def _upload(client: TestClient, content: bytes, filename: str = "statement.csv", **data):
+    return client.post(
+        "/imports/preview",
+        files={"file": (filename, content, "text/csv")},
+        data=data,
+    )
+
+
+def test_preview_patch_commit_flow_reports_correct_counts_at_each_step(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        preview = _upload(client, _csv_bytes())
+        assert preview.status_code == 200
+        body = preview.json()
+        assert body["status"] == "preview_ready"
+        assert body["counts"] == {
+            "total": 3,
+            "valid": 3,
+            "warning": 0,
+            "error": 0,
+            "duplicate": 0,
+            "excluded": 0,
+            "imported": 0,
+        }
+        batch_id = body["id"]
+        rent_id = next(
+            c["candidate_id"] for c in body["candidates"] if "Rent" in c["raw_description"]
+        )
+
+        patched = client.patch(
+            f"/imports/{batch_id}",
+            json={"excluded_candidate_ids": [rent_id], "account": "Checking"},
+        )
+        assert patched.status_code == 200
+        patched_body = patched.json()
+        assert patched_body["counts"]["excluded"] == 1
+        assert patched_body["destination_account"] == "Checking"
+
+        committed = client.post(f"/imports/{batch_id}/commit")
+        assert committed.status_code == 200
+        committed_body = committed.json()
+        assert committed_body["status"] == "committed"
+        assert committed_body["counts"]["imported"] == 2
+        assert len(committed_body["committed_transaction_ids"]) == 2
+
+        transactions = client.get("/transactions").json()
+        assert len(transactions) == 2
+        accounts = client.get("/accounts").json()
+        assert any(a["name"] == "Checking" for a in accounts)
+
+        # upload_dir is swept clean of staged files after the request cycle.
+        assert list(settings.upload_dir.iterdir()) == []
+
+
+def test_reupload_of_same_csv_reports_duplicates_and_inserts_nothing_new(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    csv_bytes = _csv_bytes()
+    with TestClient(create_app(settings)) as client:
+        first = _upload(client, csv_bytes, account="Main account")
+        batch_id = first.json()["id"]
+        first_commit = client.post(f"/imports/{batch_id}/commit")
+        assert first_commit.json()["counts"]["imported"] == 3
+
+        second = _upload(client, csv_bytes, account="Main account")
+        second_body = second.json()
+        assert second_body["counts"]["duplicate"] == 3
+
+        second_commit = client.post(f"/imports/{second_body['id']}/commit")
+        assert second_commit.status_code == 200
+        assert second_commit.json()["counts"]["imported"] == 0
+
+        transactions = client.get("/transactions").json()
+        assert len(transactions) == 3
+
+
+def test_fake_pdf_upload_is_rejected_and_leaves_upload_dir_empty(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/imports/preview",
+            files={"file": ("statement.pdf", b"%PDF-1.4 not really a csv", "application/pdf")},
+        )
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "UNSUPPORTED_FILE_TYPE"
+    assert not settings.upload_dir.exists() or list(settings.upload_dir.iterdir()) == []
+
+
+def test_oversize_upload_is_rejected_and_leaves_upload_dir_empty(tmp_path) -> None:
+    settings = _settings(tmp_path, max_upload_bytes=64)
+    with TestClient(create_app(settings)) as client:
+        response = _upload(client, _csv_bytes())
+    assert response.status_code == 413
+    assert response.json()["detail"]["code"] == "FILE_TOO_LARGE"
+    assert not settings.upload_dir.exists() or list(settings.upload_dir.iterdir()) == []
+
+
+def test_expired_batch_returns_410_and_discard_and_committed_delete_rules(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        preview = _upload(client, _csv_bytes())
+        batch_id = preview.json()["id"]
+
+        # Force expiry directly, simulating the TTL having elapsed.
+        engine = make_engine(settings)
+        session = make_session_factory(engine)()
+        batch = session.get(ImportBatchModel, batch_id)
+        assert batch is not None
+        batch.expires_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=1)
+        session.commit()
+        session.close()
+        engine.dispose()
+
+        expired_get = client.get(f"/imports/{batch_id}")
+        assert expired_get.status_code == 410
+        assert expired_get.json()["detail"]["code"] == "BATCH_EXPIRED"
+
+        # A fresh, unexpired batch can be discarded.
+        fresh = _upload(client, _csv_bytes())
+        fresh_id = fresh.json()["id"]
+        discard = client.delete(f"/imports/{fresh_id}")
+        assert discard.status_code == 200
+        assert discard.json()["status"] == "discarded"
+
+        # A committed batch cannot be deleted.
+        committed_source = _upload(client, _csv_bytes())
+        committed_id = committed_source.json()["id"]
+        client.post(f"/imports/{committed_id}/commit")
+        delete_committed = client.delete(f"/imports/{committed_id}")
+        assert delete_committed.status_code == 409
+        assert delete_committed.json()["detail"]["code"] == "BATCH_ALREADY_COMMITTED"
+
+
+def test_get_after_a_simulated_refresh_restores_the_preview(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        preview = _upload(client, _csv_bytes())
+        batch_id = preview.json()["id"]
+
+    # A brand-new app instance (and TestClient) over the same database stands in for a
+    # browser refresh: nothing survives except what's persisted.
+    with TestClient(create_app(_settings_reuse(settings))) as fresh_client:
+        refreshed = fresh_client.get(f"/imports/{batch_id}")
+        assert refreshed.status_code == 200
+        refreshed_body = refreshed.json()
+        assert refreshed_body["id"] == batch_id
+        assert refreshed_body["status"] == "preview_ready"
+        assert len(refreshed_body["candidates"]) == 3
+
+
+def _settings_reuse(settings: Settings) -> Settings:
+    """Same database and upload dir, standing in for a second app process/browser tab."""
+    return Settings(database_url=settings.database_url, upload_dir=settings.upload_dir)
+
+
+def test_commit_is_atomic_when_a_row_fails_partway(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path)
+    original_add = TransactionRepository.add
+    calls = {"n": 0}
+
+    def flaky_add(self, transaction):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise RuntimeError("simulated database failure")
+        return original_add(self, transaction)
+
+    monkeypatch.setattr(TransactionRepository, "add", flaky_add)
+
+    with TestClient(create_app(settings), raise_server_exceptions=False) as client:
+        preview = _upload(client, _csv_bytes())
+        batch_id = preview.json()["id"]
+        commit = client.post(f"/imports/{batch_id}/commit")
+        assert commit.status_code == 500
+
+    monkeypatch.undo()
+    with TestClient(create_app(_settings_reuse(settings))) as verify_client:
+        assert verify_client.get("/transactions").json() == []
+
+
+def test_no_raw_uploaded_bytes_anywhere_in_sqlite(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    csv_bytes = (
+        b"date,description,amount,account\n2026-08-01,VERY_UNIQUE_MARKER_XYZ987,-350,Main account\n"
+    )
+    with TestClient(create_app(settings)) as client:
+        preview = _upload(client, csv_bytes)
+        batch_id = preview.json()["id"]
+        client.post(f"/imports/{batch_id}/commit")
+
+    db_path = tmp_path / "pfa.db"
+    db_bytes = db_path.read_bytes()
+    assert csv_bytes not in db_bytes
+    assert list(settings.upload_dir.iterdir()) == []

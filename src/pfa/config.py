@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -18,6 +19,11 @@ class Settings(BaseSettings):
     agent_request_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
     agent_request_limit: int = Field(default=8, ge=1, le=20)
     agent_output_token_limit: int = Field(default=1024, ge=128, le=4096)
+    upload_dir: Path = Path("data/uploads")
+    max_upload_bytes: int = Field(default=15 * 1024 * 1024, gt=0, le=100 * 1024 * 1024)
+    max_candidate_rows: int = Field(default=10_000, ge=1, le=100_000)
+    import_batch_ttl_hours: int = Field(default=24, ge=1, le=24 * 30)
+    extraction_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
 
 
 @lru_cache
