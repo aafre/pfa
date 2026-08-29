@@ -292,13 +292,20 @@ def apply_patch(uow: UnitOfWork, batch_id: str, patch: BatchPatch) -> ImportBatc
         for candidate in candidates:
             candidate.included = candidate.candidate_id not in excluded
 
+    if patch.amount_sign in AMOUNT_SIGN_CONVENTIONS:
+        batch.amount_sign = patch.amount_sign
+
     service = ImportService(uow)
     service.validate(candidates)
-    if patch.amount_sign is not None and patch.amount_sign in AMOUNT_SIGN_CONVENTIONS:
+    if batch.amount_sign:
         for candidate in candidates:
-            # After validate (which sets direction) and before duplicate resolution, whose
-            # fingerprint covers the signed amount.
-            _apply_amount_sign(candidate, patch.amount_sign)
+            # Re-applied from the stored convention on every patch, not only the one
+            # that set it. Directions do survive in the candidate blob today, but only
+            # because validate() happens to skip rows it has already parsed; anything
+            # that clears an amount would quietly hand that row back to as_written.
+            # Still after validate (which sets direction) and before duplicate
+            # resolution, whose fingerprint covers the signed amount.
+            _apply_amount_sign(candidate, batch.amount_sign)
     service.resolve_duplicates(candidates)
 
     batch.candidates_json = candidates_to_json(candidates)
