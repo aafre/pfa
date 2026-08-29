@@ -40,11 +40,13 @@ from .candidates import (
     CandidateIssue,
     CandidateTransaction,
     ExtractionResult,
+    StatementExtractor,
     StatementSource,
     candidates_from_json,
     candidates_to_json,
 )
 from .extractors.csv import CsvStatementExtractor
+from .extractors.ocr import OcrFallbackPdfExtractor
 
 logger = logging.getLogger("pfa")
 
@@ -93,11 +95,26 @@ def batch_committed_transaction_ids(batch: ImportBatchModel) -> list[int]:
     return list(json.loads(batch.committed_transaction_ids_json))
 
 
-def _run_extraction(source: StatementSource, settings: Settings) -> ExtractionResult:
+def _extractor_for(source: StatementSource, settings: Settings) -> StatementExtractor:
+    """Picks the extractor from the extension the upload policy already validated.
+
+    PDFs always go through the OCR-fallback wrapper: it runs native extraction first and
+    only reaches for Tesseract on pages that have no usable text of their own.
+    """
+    if source.path.suffix.lower() == ".pdf":
+        return OcrFallbackPdfExtractor(
+            settings=settings,
+            max_pdf_pages=settings.max_pdf_pages,
+            max_candidate_rows=settings.max_candidate_rows,
+        )
+    return CsvStatementExtractor()
+
+
+def _run_extraction(
+    extractor: StatementExtractor, source: StatementSource, settings: Settings
+) -> ExtractionResult:
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    future: concurrent.futures.Future[ExtractionResult] = pool.submit(
-        CsvStatementExtractor().extract, source
-    )
+    future: concurrent.futures.Future[ExtractionResult] = pool.submit(extractor.extract, source)
     try:
         return future.result(timeout=settings.extraction_timeout_seconds)
     except concurrent.futures.TimeoutError:
@@ -127,13 +144,14 @@ def create_batch(
     account: str | None = None,
 ) -> ImportBatchModel:
     now = _now()
+    extractor = _extractor_for(source, settings)
     batch = ImportBatchModel(
         id=uuid.uuid4().hex,
         original_filename=source.original_filename,
         media_type=source.media_type,
         size_bytes=source.size_bytes,
         sha256=source.sha256,
-        extractor=CsvStatementExtractor.name,
+        extractor=extractor.name,
         status="extracting",
         destination_account=account,
         issues_json="[]",
@@ -144,7 +162,7 @@ def create_batch(
     )
 
     try:
-        extraction = _run_extraction(source, settings)
+        extraction = _run_extraction(extractor, source, settings)
     except concurrent.futures.TimeoutError:
         return _fail(batch, uow, EXTRACTION_TIMEOUT, "extraction took too long; try a smaller file")
     except Exception as exc:  # parser crash: sanitize, never leak paths/text/tracebacks

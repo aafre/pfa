@@ -1,8 +1,8 @@
 """Multipart upload staging: bounded, streamed, and signature-checked.
 
-CSV only in this slice - a PDF extractor arrives on a parallel branch and must plug in
-without any change here. Never trust the client-supplied filename as a path component;
-the staged name is always generated.
+Accepts CSV and PDF. Never trust the client-supplied filename as a path component;
+the staged name is always generated. The extension decides which signature check runs
+and, downstream, which extractor the batch layer selects.
 """
 
 from __future__ import annotations
@@ -25,9 +25,10 @@ from .candidates import (
 )
 
 CHUNK_SIZE = 64 * 1024
-# PDF support lands on a parallel branch; this build only ever accepts CSV.
-SUPPORTED_EXTENSIONS = {".csv"}
-REJECTED_MEDIA_PREFIXES = ("application/pdf", "image/")
+SUPPORTED_EXTENSIONS = {".csv", ".pdf"}
+DEFAULT_MEDIA_TYPES = {".csv": "text/csv", ".pdf": "application/pdf"}
+PDF_SIGNATURE = b"%PDF-"
+REJECTED_MEDIA_PREFIXES = ("image/",)
 
 
 def stage_upload(
@@ -48,10 +49,11 @@ def stage_upload(
     if ext not in SUPPORTED_EXTENSIONS:
         raise UploadRejected(
             UNSUPPORTED_FILE_TYPE,
-            f"unsupported file type {ext or '(none)'!r}; only .csv is accepted in this build",
+            f"unsupported file type {ext or '(none)'!r}; only .csv and .pdf are accepted",
         )
     media_type = file.content_type or ""
-    if media_type.startswith(REJECTED_MEDIA_PREFIXES):
+    # Lowercased: a blocklist that "Image/PNG" walks straight through is not a blocklist.
+    if media_type.lower().startswith(REJECTED_MEDIA_PREFIXES):
         raise UploadRejected(UNSUPPORTED_FILE_TYPE, f"unsupported content type {media_type!r}")
 
     settings.upload_dir.mkdir(parents=True, exist_ok=True)
@@ -80,17 +82,23 @@ def stage_upload(
         staged_path.unlink(missing_ok=True)
         raise UploadRejected(UPLOAD_FAILED, "uploaded file is empty")
 
-    try:
-        with staged_path.open("rb") as handle:
-            handle.read(4096).decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        staged_path.unlink(missing_ok=True)
-        raise UploadRejected(INVALID_SIGNATURE, "file is not valid UTF-8 CSV text") from exc
+    with staged_path.open("rb") as handle:
+        head = handle.read(4096)
+    if ext == ".pdf":
+        if not head.startswith(PDF_SIGNATURE):
+            staged_path.unlink(missing_ok=True)
+            raise UploadRejected(INVALID_SIGNATURE, "file is not a valid PDF")
+    else:
+        try:
+            head.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            staged_path.unlink(missing_ok=True)
+            raise UploadRejected(INVALID_SIGNATURE, "file is not valid UTF-8 CSV text") from exc
 
     return StatementSource(
         path=staged_path,
         original_filename=original_filename,
-        media_type=media_type or "text/csv",
+        media_type=media_type or DEFAULT_MEDIA_TYPES[ext],
         size_bytes=total,
         sha256=digest.hexdigest(),
     )

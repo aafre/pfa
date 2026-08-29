@@ -1,5 +1,7 @@
+import sys
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
@@ -10,8 +12,13 @@ from pfa.config import Settings
 from pfa.db.engine import make_engine, make_session_factory
 from pfa.db.models import ImportBatchModel
 from pfa.db.repositories import TransactionRepository
-from pfa.ingestion.candidates import ExtractionResult
-from pfa.ingestion.extractors.csv import CsvStatementExtractor
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from fixtures.pdf_builder import build_pdf, statement_page  # noqa: E402
+
+from pfa.ingestion.candidates import ExtractionResult  # noqa: E402
+from pfa.ingestion.extractors.csv import CsvStatementExtractor  # noqa: E402
 
 
 def _settings(tmp_path, **overrides) -> Settings:
@@ -112,11 +119,29 @@ def test_fake_pdf_upload_is_rejected_and_leaves_upload_dir_empty(tmp_path) -> No
     with TestClient(create_app(settings)) as client:
         response = client.post(
             "/imports/preview",
-            files={"file": ("statement.pdf", b"%PDF-1.4 not really a csv", "application/pdf")},
+            files={"file": ("statement.pdf", b"not really a pdf at all", "application/pdf")},
         )
     assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "UNSUPPORTED_FILE_TYPE"
+    assert response.json()["detail"]["code"] == "INVALID_SIGNATURE"
     assert not settings.upload_dir.exists() or list(settings.upload_dir.iterdir()) == []
+
+
+def test_signed_but_unparseable_pdf_blocks_the_batch_and_leaves_upload_dir_empty(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/imports/preview",
+            files={"file": ("statement.pdf", b"%PDF-1.4 truncated garbage", "application/pdf")},
+        )
+    # Signature passes, so this is an extraction problem, not an upload rejection - the
+    # extractor names it, and it must stay sanitized: no staged path, no traceback.
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "blocked"
+    assert [issue["code"] for issue in body["issues"]] == ["PDF_NOT_EXTRACTABLE"]
+    assert str(settings.upload_dir) not in response.text
+    assert "Traceback" not in response.text
+    assert list(settings.upload_dir.iterdir()) == []
 
 
 def test_oversize_upload_is_rejected_and_leaves_upload_dir_empty(tmp_path) -> None:
@@ -301,3 +326,102 @@ def test_service_open_failure_after_staging_leaves_no_staged_file(tmp_path, monk
         response = _upload(client, _csv_bytes())
         assert response.status_code == 500
         assert list(settings.upload_dir.iterdir()) == []
+
+
+def _pdf_bytes(rows: list[list[str]]) -> bytes:
+    """A one-page digital statement: header row plus `rows`, at fixed column positions."""
+    header = [["Date", "Description", "Amount"]]
+    return build_pdf([statement_page(header + rows, [72, 160, 400])])
+
+
+def _upload_pdf(client: TestClient, content: bytes, **data):
+    return client.post(
+        "/imports/preview",
+        files={"file": ("statement.pdf", content, "application/pdf")},
+        data=data,
+    )
+
+
+def test_digital_pdf_previews_and_commits_through_the_api(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    pdf = _pdf_bytes(
+        [
+            ["2026-08-01", "Salary", "2000.00"],
+            ["2026-08-02", "Coffee Shop", "-3.50"],
+        ]
+    )
+    with TestClient(create_app(settings)) as client:
+        preview = _upload_pdf(client, pdf, account="Main account")
+        assert preview.status_code == 200
+        body = preview.json()
+        # The whole point of the wiring: a PDF must reach the PDF extractor, not the CSV one.
+        assert body["extractor"] == "pdf/1+ocr"
+        assert body["page_count"] == 1
+        assert body["status"] == "preview_ready"
+        assert body["counts"]["total"] == 2
+        assert {c["raw_description"] for c in body["candidates"]} == {"Salary", "Coffee Shop"}
+        assert all(c["source_page"] == 1 for c in body["candidates"])
+
+        commit = client.post(f"/imports/{body['id']}/commit")
+        assert commit.status_code == 200
+        assert commit.json()["counts"]["imported"] == 2
+
+        assert len(client.get("/transactions").json()) == 2
+    assert list(settings.upload_dir.iterdir()) == []
+
+
+def test_reuploading_the_same_pdf_reports_duplicates_and_imports_nothing(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    pdf = _pdf_bytes([["2026-08-01", "Salary", "2000.00"]])
+    with TestClient(create_app(settings)) as client:
+        first = _upload_pdf(client, pdf, account="Main account")
+        client.post(f"/imports/{first.json()['id']}/commit")
+
+        second = _upload_pdf(client, pdf, account="Main account")
+        body = second.json()
+        assert body["counts"]["duplicate"] == 1
+        commit = client.post(f"/imports/{body['id']}/commit")
+        assert commit.json()["counts"]["imported"] == 0
+
+        assert len(client.get("/transactions").json()) == 1
+
+
+def test_pdf_over_the_page_limit_is_reported_and_leaves_upload_dir_empty(tmp_path) -> None:
+    settings = _settings(tmp_path, max_pdf_pages=1)
+    two_pages = build_pdf(
+        [
+            statement_page([["Date", "Description", "Amount"]], [72, 160, 400]),
+            statement_page([["2026-08-01", "Salary", "2000.00"]], [72, 160, 400]),
+        ]
+    )
+    with TestClient(create_app(settings)) as client:
+        body = _upload_pdf(client, two_pages).json()
+    assert body["status"] == "blocked"
+    assert "PDF_TOO_MANY_PAGES" in [issue["code"] for issue in body["issues"]]
+    assert list(settings.upload_dir.iterdir()) == []
+
+
+def test_scanned_pdf_without_tesseract_reports_ocr_unavailable(tmp_path) -> None:
+    """Tesseract is not installed here, so this is the real local experience for a scan."""
+    from fixtures.pdf_builder import write_scanned_pdf
+
+    scanned = write_scanned_pdf(tmp_path / "scan.pdf", ["2026-08-01  Salary  2000.00"])
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        body = _upload_pdf(client, scanned.read_bytes()).json()
+    assert body["extractor"] == "pdf/1+ocr"
+    codes = [issue["code"] for issue in body["issues"]]
+    assert "OCR_UNAVAILABLE" in codes
+    assert list(settings.upload_dir.iterdir()) == []
+
+
+def test_malformed_content_length_does_not_500(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings), raise_server_exceptions=False) as client:
+        response = client.post(
+            "/imports/preview",
+            files={"file": ("statement.csv", _csv_bytes(), "text/csv")},
+            headers={"content-length": "not-a-number"},
+        )
+    # Starlette may reject the framing itself; what must not happen is a 500 from int().
+    assert response.status_code != 500

@@ -258,10 +258,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         account: str | None = Form(None),  # noqa: B008
     ) -> ImportBatchResponse:
         content_length = request.headers.get("content-length")
+        # A header the client controls must not be able to turn a bad request into a 500;
+        # an unparseable one just means the size cap falls back to the copy loop.
+        declared_size = int(content_length) if content_length and content_length.isdigit() else None
         try:
-            source = stage_upload(
-                file, active_settings, int(content_length) if content_length else None
-            )
+            source = stage_upload(file, active_settings, declared_size)
         except UploadRejected as exc:
             status_code = _UPLOAD_ERROR_STATUS.get(exc.code, 422)
             raise HTTPException(
