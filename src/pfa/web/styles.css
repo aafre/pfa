@@ -2404,3 +2404,58 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
     animation-duration: 0.01ms !important;
   }
 }
+
+/* Phase 0 — Error banner when API is unreachable */
+.overview-error-banner {
+  background: var(--red-pale);
+  color: var(--red);
+  border: 1px solid var(--red);
+  border-radius: var(--radius-sm);
+  padding: 12px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 16px;
+}
+
+/* Phase 0 — Amount sign convention selector */
+.amount-sign-wrap {
+  margin-bottom: 16px;
+}
+
+.amount-sign-alert {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  background: var(--amber-pale);
+  border: 1px solid var(--amber);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+}
+
+.amount-sign-content {
+  flex: 1;
+}
+
+.amount-sign-content strong {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 4px;
+  color: var(--ink);
+}
+
+.amount-sign-content p {
+  font-size: 12px;
+  color: var(--ink-secondary);
+  margin-bottom: 10px;
+}
+
+.amount-sign-content .select-input {
+  max-width: 340px;
+}
+
+/* Phase 0 — Error-severity issue badge */
+.issue-badge.issue-error {
+  background: var(--red-pale);
+  color: var(--red);
+  border-color: var(--red);
+}

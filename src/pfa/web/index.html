@@ -104,6 +104,7 @@
 
           <!-- VIEW 1: OVERVIEW -->
           <section class="view-panel is-active" id="view-overview" data-view="overview" aria-label="Overview View">
+            <div class="overview-error-banner" id="overview-error-banner" hidden role="alert"></div>
             <section class="metric-band" id="metric-band" aria-label="Financial summary">
               <article class="metric-cell">
                 <div class="metric-head"><span>Total Income</span><span class="metric-marker marker-up" aria-hidden="true">↗</span></div>
@@ -300,6 +301,22 @@
                       <input list="known-accounts-list" id="destination-account-input" class="text-input" placeholder="e.g. Main Checking" />
                       <datalist id="known-accounts-list"></datalist>
                       <button class="button-secondary" type="button" id="save-account-btn">Assign</button>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- AMOUNT SIGN CONVENTION -->
+                <div class="amount-sign-wrap" id="amount-sign-wrap" hidden>
+                  <div class="amount-sign-alert">
+                    <span class="alert-icon" aria-hidden="true">⚠️</span>
+                    <div class="amount-sign-content">
+                      <strong>All amounts are positive — how should PFA interpret them?</strong>
+                      <p>Some banks export charges as positive numbers. Choose the correct convention to ensure spending is recorded correctly.</p>
+                      <select id="amount-sign-select" class="select-input" aria-label="Amount sign convention">
+                        <option value="">— Select sign convention —</option>
+                        <option value="as_written">As written (positive = credit/income)</option>
+                        <option value="debit_positive">Debit-positive (positive = charge/spending)</option>
+                      </select>
                     </div>
                   </div>
                 </div>

@@ -35,7 +35,9 @@ flowchart LR
 
 - **Local-first ledger** — SQLite is the source of truth; no hosted telemetry or cloud model requirement is implemented.
 - **Deterministic finance engine** — income, spending, savings rate, budgets, goals, recurring evidence, anomalies, trends, and scenarios are calculated in Python from integer minor units.
-- **Statement import studio** — upload CSV or PDF statements in the browser, preview extracted rows, review warnings/errors, exclude rows, and commit explicitly.
+- **Statement import studio** — upload CSV or PDF statements in the browser, preview extracted rows,
+  review warnings/errors, exclude rows, state the statement's sign convention, and commit explicitly.
+  Commit is blocked while any included row has a blocking error or the sign convention is unanswered.
 - **PDF + OCR path** — digital PDFs use `pdfplumber`; scanned PDF pages can fall back to local Tesseract OCR when installed.
 - **CLI, API, and dashboard** — Typer/Rich commands, FastAPI/OpenAPI endpoints, and a vanilla HTML/CSS/JS dashboard served by the same local app.
 - **Bounded AI boundary** — optional PydanticAI advisor uses local Ollama with typed read-only tools and rejects financial-number answers that used no tool result.
@@ -270,6 +272,11 @@ The normal test suite does not call Ollama. `uv run pfa eval-classifier` is a se
 - The API is intentionally unauthenticated and intended for localhost (`127.0.0.1`), not direct internet exposure.
 - Browser upload accepts `.csv` and `.pdf`; images and other file types are rejected.
 - Generic PDF extraction is best-effort and does not guarantee support for every bank layout.
+  Against a real corpus (HSBC current account, HSBC Visa, American Express) no PDF statement yet
+  imports end to end; see [real-statement findings](docs/plans/2026-08-29-real-statement-extraction-findings.md).
+  Treat browser PDF import as work in progress, not a supported path.
+- Statements whose amounts are all unsigned positives (typical of credit-card exports) require an
+  explicit sign convention before commit. PFA never infers it: an all-positive statement is genuinely ambiguous.
 - Password-protected PDFs are rejected.
 - Scanned PDFs require local Tesseract; low-confidence OCR for dates/amounts blocks commit until the row is fixed or excluded.
 - Browser preview currently supports account assignment and row exclusion; committed ledger editing is not implemented in the dashboard.
