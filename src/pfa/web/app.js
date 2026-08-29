@@ -3,71 +3,22 @@
  * Impeccable Design & Deterministic Finance Engine
  */
 
-const FALLBACK_DATA = {
-  "2026-06": {
-    period: "2026-06",
-    currency: "GBP",
-    income_minor: 350000,
-    spending_minor: 178599,
-    savings_minor: 40000,
-    investments_minor: 30000,
-    net_cashflow_minor: 171401,
-    savings_rate_percent: 20.0,
-    transaction_count: 11,
-    categories: [
-      { category: "housing", total_minor: 120000 },
-      { category: "groceries", total_minor: 32000 },
-      { category: "eating_out", total_minor: 11000 },
-      { category: "transport", total_minor: 9000 },
-      { category: "utilities", total_minor: 8500 },
-      { category: "subscriptions", total_minor: 1599 }
-    ]
-  },
-  "2026-07": {
-    period: "2026-07",
-    currency: "GBP",
-    income_minor: 350000,
-    spending_minor: 200099,
-    savings_minor: 40000,
-    investments_minor: 30000,
-    net_cashflow_minor: 149901,
-    savings_rate_percent: 20.0,
-    transaction_count: 11,
-    categories: [
-      { category: "housing", total_minor: 120000 },
-      { category: "groceries", total_minor: 36000 },
-      { category: "eating_out", total_minor: 18000 },
-      { category: "transport", total_minor: 10500 },
-      { category: "utilities", total_minor: 14000 },
-      { category: "subscriptions", total_minor: 1599 }
-    ]
-  },
-  "2026-08": {
-    period: "2026-08",
-    currency: "GBP",
-    income_minor: 350000,
-    spending_minor: 311099,
-    savings_minor: 40000,
-    investments_minor: 30000,
-    net_cashflow_minor: 38901,
-    savings_rate_percent: 20.0,
-    transaction_count: 12,
-    categories: [
-      { category: "housing", total_minor: 120000 },
-      { category: "shopping", total_minor: 78000 },
-      { category: "groceries", total_minor: 39000 },
-      { category: "eating_out", total_minor: 26000 },
-      { category: "debt_payment", total_minor: 25000 },
-      { category: "transport", total_minor: 12000 },
-      { category: "utilities", total_minor: 9500 },
-      { category: "subscriptions", total_minor: 1599 }
-    ]
-  }
+const EMPTY_MONTH = {
+  period: "",
+  currency: "GBP",
+  income_minor: 0,
+  spending_minor: 0,
+  savings_minor: 0,
+  investments_minor: 0,
+  net_cashflow_minor: 0,
+  savings_rate_percent: 0,
+  transaction_count: 0,
+  categories: []
 };
 
 const state = {
   route: "overview",
-  month: "2026-08",
+  month: new Date().toISOString().slice(0, 7),
   data: {},
   accounts: [],
   transactions: [],
@@ -77,7 +28,8 @@ const state = {
   batchFilter: "all",
   chatHistory: [],
   source: "live",
-  modelAvailable: true
+  modelAvailable: true,
+  loadError: null
 };
 
 const $ = (id) => document.getElementById(id);
@@ -203,9 +155,11 @@ async function loadMonthData(period) {
     state.transactions = txs;
     state.accounts = accounts;
     state.source = "live";
+    state.loadError = null;
   } catch (error) {
-    state.data[period] = FALLBACK_DATA[period] || { ...FALLBACK_DATA["2026-08"], period };
-    state.source = "demo";
+    state.data[period] = { ...EMPTY_MONTH, period };
+    state.source = "error";
+    state.loadError = error.message || "Could not reach the PFA API";
   }
 
   // Check health
@@ -235,7 +189,7 @@ function renderCurrentRoute() {
     $("active-account-label").textContent = state.accounts[0].name;
     const knownList = $("known-accounts-list");
     if (knownList) {
-      knownList.innerHTML = state.accounts.map((a) => `<option value="${a.name}">${a.name} (${a.account_type})</option>`).join("");
+      knownList.innerHTML = state.accounts.map((a) => `<option value="${escapeHtml(a.name)}">${escapeHtml(a.name)} (${escapeHtml(a.account_type)})</option>`).join("");
     }
   }
 
@@ -244,9 +198,20 @@ function renderCurrentRoute() {
 
 // 1. OVERVIEW RENDERING
 function renderOverview() {
-  const data = state.data[state.month] || FALLBACK_DATA[state.month];
+  const data = state.data[state.month] || { ...EMPTY_MONTH, period: state.month };
   const prevPeriod = monthShift(state.month, -1);
-  const previous = state.data[prevPeriod] || FALLBACK_DATA[prevPeriod] || data;
+  const previous = state.data[prevPeriod] || data;
+
+  // Show error banner if the API is unreachable
+  const errorBanner = $("overview-error-banner");
+  if (errorBanner) {
+    if (state.loadError) {
+      errorBanner.hidden = false;
+      errorBanner.textContent = `⚠ ${state.loadError} — showing empty state. Start the server with: uvicorn pfa.api.app:app`;
+    } else {
+      errorBanner.hidden = true;
+    }
+  }
 
   $("month-label").textContent = monthName(state.month);
   $("income-value").textContent = formatMoney(data.income_minor, data.currency, true);
@@ -284,11 +249,11 @@ function renderAuditList(data, previous) {
   $("audit-title").textContent = rows.length === 1 ? "One major change stands out this month." : "Most of the spending movement is in two places.";
 
   const delta = Math.abs(data.spending_minor - previous.spending_minor);
-  $("review-copy").innerHTML = `Spending moved ${data.spending_minor >= previous.spending_minor ? "up" : "down"} <strong>${formatMoney(delta, data.currency, true)}</strong> from ${monthName(previous.period || monthShift(state.month, -1))}. Deterministic SQL evidence highlights the primary category drivers below.`;
+  $("review-copy").innerHTML = `Spending moved ${data.spending_minor >= previous.spending_minor ? "up" : "down"} <strong>${formatMoney(delta, data.currency, true)}</strong> from ${escapeHtml(monthName(previous.period || monthShift(state.month, -1)))}. Deterministic SQL evidence highlights the primary category drivers below.`;
 
   $("audit-list").innerHTML = rows.map((item, idx) => {
     const isNew = !prior[item.category];
-    const label = isNew ? `${prettyCategory(item.category)} is the new pressure point` : `${prettyCategory(item.category)} moved up from last month`;
+    const label = isNew ? `${escapeHtml(prettyCategory(item.category))} is the new pressure point` : `${escapeHtml(prettyCategory(item.category))} moved up from last month`;
     const desc = `${formatMoney(item.amount, data.currency, true)} this month · ${isNew ? "no baseline in previous month" : `${formatMoney(item.delta, data.currency, true)} above prior`}`;
     return `
       <div class="audit-row" role="listitem">
@@ -318,7 +283,7 @@ function renderTopCategories(data) {
     const widthPct = Math.max(5, (amount / max) * 100);
     return `
       <div class="category-line">
-        <span class="category-name" title="${prettyCategory(item.category)}">${prettyCategory(item.category)}</span>
+        <span class="category-name" title="${escapeHtml(prettyCategory(item.category))}">${escapeHtml(prettyCategory(item.category))}</span>
         <div class="bar-track">
           <div class="bar-fill ${kind}" style="width:${widthPct}%"></div>
         </div>
@@ -330,7 +295,7 @@ function renderTopCategories(data) {
 
 function renderCashflowBars() {
   const periods = [monthShift(state.month, -2), monthShift(state.month, -1), state.month];
-  const monthsData = periods.map((p) => state.data[p] || FALLBACK_DATA[p] || FALLBACK_DATA[state.month]);
+  const monthsData = periods.map((p) => state.data[p] || { ...EMPTY_MONTH, period: p });
   const max = Math.max(...monthsData.flatMap((d) => [d.income_minor, d.spending_minor]), 1);
 
   $("trend-span-label").textContent = `${monthShortName(periods[0])} — ${monthShortName(periods[2])}`;
@@ -457,6 +422,32 @@ function setupUploadHandlers() {
     }
   });
 
+  // Amount Sign Convention selector
+  const amountSignSelect = $("amount-sign-select");
+  if (amountSignSelect) {
+    amountSignSelect.addEventListener("change", async () => {
+      if (!state.activeBatch) return;
+      const signValue = amountSignSelect.value;
+      if (!signValue) {
+        updateBatchCounts(state.activeBatch);
+        return;
+      }
+      try {
+        const patched = await apiRequest(`/imports/${state.activeBatch.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ amount_sign: signValue })
+        });
+        state.activeBatch = patched;
+        updateBatchCounts(patched);
+        renderCandidatesTable();
+        showToast(`Amount sign set to "${signValue}"`);
+      } catch (err) {
+        showToast(err.message, true);
+      }
+    });
+  }
+
   // Upload Another Button
   $("upload-another-btn").addEventListener("click", () => {
     $("batch-success-card").hidden = true;
@@ -502,14 +493,42 @@ function renderBatchInspector(batch) {
 
   $("destination-account-input").value = batch.destination_account || batch.detected_account || "Main Checking";
 
+  // Amount sign selector: show when all candidates have positive unsigned amounts
+  renderAmountSignSelector(batch);
+
   updateBatchCounts(batch);
   renderCandidatesTable();
 
   if (batch.issues && batch.issues.length > 0) {
     $("batch-issues-alert").hidden = false;
-    $("batch-issues-content").innerHTML = batch.issues.map((i) => `<div><strong>${i.code}:</strong> ${i.message}</div>`).join("");
+    $("batch-issues-content").innerHTML = batch.issues.map((i) => `<div><strong>${escapeHtml(i.code)}:</strong> ${escapeHtml(i.message)}</div>`).join("");
   } else {
     $("batch-issues-alert").hidden = true;
+  }
+}
+
+function renderAmountSignSelector(batch) {
+  const wrap = $("amount-sign-wrap");
+  if (!wrap) return;
+
+  const candidates = batch.candidates || [];
+  // Show selector when all candidates with amounts are positive (unsigned)
+  const allPositive = candidates.length > 0 && candidates.every((c) =>
+    c.amount_minor === null || c.amount_minor === undefined || c.amount_minor >= 0
+  );
+  const noDirectionInfo = candidates.every((c) => c.direction !== "debit");
+
+  if (allPositive && noDirectionInfo) {
+    wrap.hidden = false;
+    const select = $("amount-sign-select");
+    // Pre-select if batch already has an amount_sign set
+    if (batch.amount_sign) {
+      select.value = batch.amount_sign;
+    } else {
+      select.value = "";
+    }
+  } else {
+    wrap.hidden = true;
   }
 }
 
@@ -520,9 +539,37 @@ function updateBatchCounts(batch) {
   $("count-duplicate").textContent = batch.counts.duplicate || 0;
   $("count-excluded").textContent = batch.counts.excluded || 0;
 
-  const validToCommit = (batch.counts.total || 0) - (batch.counts.excluded || 0);
-  $("commit-summary-note").textContent = `Ready to commit ${validToCommit} transactions`;
-  $("commit-batch-btn").disabled = validToCommit === 0;
+  const validToCommit = (batch.counts.valid || 0);
+  const candidates = batch.candidates || [];
+
+  // Check for blocking errors on included candidates
+  const blockingErrors = candidates.filter((c) =>
+    c.included && c.issues && c.issues.some((i) => i.severity === "error")
+  );
+
+  // Check if amount_sign is needed but not set
+  const signWrap = $("amount-sign-wrap");
+  const needsSign = signWrap && !signWrap.hidden && !($("amount-sign-select")?.value);
+
+  const commitBtn = $("commit-batch-btn");
+  const noteEl = $("commit-summary-note");
+
+  if (blockingErrors.length > 0) {
+    commitBtn.disabled = true;
+    const reasons = [...new Set(blockingErrors.flatMap((c) =>
+      c.issues.filter((i) => i.severity === "error").map((i) => i.code)
+    ))];
+    noteEl.textContent = `Blocked: ${blockingErrors.length} candidate(s) have errors (${reasons.join(", ")})`;
+  } else if (needsSign) {
+    commitBtn.disabled = true;
+    noteEl.textContent = "Set the amount sign convention before committing";
+  } else if (validToCommit === 0) {
+    commitBtn.disabled = true;
+    noteEl.textContent = "No valid transactions to commit";
+  } else {
+    commitBtn.disabled = false;
+    noteEl.textContent = `Ready to commit ${validToCommit} transactions`;
+  }
 }
 
 function renderCandidatesTable() {
@@ -541,33 +588,33 @@ function renderCandidatesTable() {
   });
 
   if (filtered.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; padding: 28px; color: var(--muted);">No candidates match the "${filter}" filter.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; padding: 28px; color: var(--muted);">No candidates match the "${escapeHtml(filter)}" filter.</td></tr>`;
     return;
   }
 
   tbody.innerHTML = filtered.map((c) => {
-    const isOutflow = c.direction === "outflow";
+    const isDebit = c.direction === "debit";
     const amountStr = formatMoney(c.amount_minor, c.currency);
     const issues = c.issues || [];
-    const issueHtml = issues.map((i) => `<span class="issue-badge issue-warning" title="${i.message}">${i.code}</span>`).join(" ");
+    const issueHtml = issues.map((i) => `<span class="issue-badge issue-${i.severity === 'error' ? 'error' : 'warning'}" title="${escapeHtml(i.message)}">${escapeHtml(i.code)}</span>`).join(" ");
     const dupHtml = c.duplicate_of ? `<span class="issue-badge issue-duplicate">Duplicate of #${c.duplicate_of}</span>` : "";
 
     return `
       <tr class="${c.included ? "" : "is-excluded"}" data-candidate-id="${c.candidate_id}">
         <td class="th-check">
-          <input type="checkbox" class="candidate-checkbox" data-id="${c.candidate_id}" ${c.included ? "checked" : ""} aria-label="Include ${c.raw_description}" />
+          <input type="checkbox" class="candidate-checkbox" data-id="${c.candidate_id}" ${c.included ? "checked" : ""} aria-label="Include ${escapeHtml(c.raw_description)}" />
         </td>
-        <td><span class="num">${c.transaction_date || c.posted_date || "—"}</span></td>
+        <td><span class="num">${escapeHtml(c.transaction_date || c.posted_date || "—")}</span></td>
         <td class="candidate-desc">
-          <strong>${c.normalized_description || c.raw_description}</strong>
-          <small>${c.raw_description}</small>
+          <strong>${escapeHtml(c.normalized_description || c.raw_description)}</strong>
+          <small>${escapeHtml(c.raw_description)}</small>
         </td>
-        <td><span class="category-tag">${prettyCategory(c.category)}</span></td>
-        <td class="candidate-amount ${isOutflow ? "is-outflow" : "is-inflow"}">
-          ${isOutflow ? `−${amountStr}` : `+${amountStr}`}
+        <td><span class="category-tag">${escapeHtml(prettyCategory(c.category))}</span></td>
+        <td class="candidate-amount ${isDebit ? "is-outflow" : "is-inflow"}">
+          ${isDebit ? `−${amountStr}` : `+${amountStr}`}
         </td>
         <td>
-          <span class="meta-chip">${c.extraction_method || "table"}</span>
+          <span class="meta-chip">${escapeHtml(c.extraction_method || "table")}</span>
           ${issueHtml}
           ${dupHtml}
         </td>
@@ -630,7 +677,7 @@ async function bulkToggleCandidates(includeAll) {
 
 // 3. CATEGORIES & BUDGETS VIEW
 function renderCategoriesView() {
-  const data = state.data[state.month] || FALLBACK_DATA[state.month];
+  const data = state.data[state.month] || { ...EMPTY_MONTH, period: state.month };
   const categories = data.categories || [];
   const totalSpend = data.spending_minor || 0;
 
@@ -647,7 +694,7 @@ function renderCategoriesView() {
       return `
         <div class="category-card-row">
           <div class="category-card-head">
-            <strong>${prettyCategory(cat.category)}</strong>
+            <strong>${escapeHtml(prettyCategory(cat.category))}</strong>
             <span class="category-card-amount">${formatMoney(amount, data.currency)}</span>
           </div>
           <div class="category-card-bar-wrap">
@@ -669,20 +716,20 @@ function renderCategoriesView() {
     budgetsList.innerHTML = `<p style="color:var(--muted); font-size:12px;">No active budgets defined for this month.</p>`;
   } else {
     budgetsList.innerHTML = budgets.map((b) => {
-      const isOver = b.spent_minor > b.allocated_minor;
-      const pct = b.allocated_minor > 0 ? Math.min(100, (b.spent_minor / b.allocated_minor) * 100) : 100;
+      const isOver = b.over_budget;
+      const pct = b.budget_minor > 0 ? Math.min(100, (b.actual_minor / b.budget_minor) * 100) : 100;
       return `
         <div class="budget-item">
           <div class="budget-head">
-            <strong>${prettyCategory(b.category)}</strong>
-            <span class="budget-status-pill ${isOver ? "status-over" : "status-under"}">${isOver ? `Over by ${formatMoney(b.spent_minor - b.allocated_minor, b.currency)}` : `Remaining: ${formatMoney(b.allocated_minor - b.spent_minor, b.currency)}`}</span>
+            <strong>${escapeHtml(prettyCategory(b.category))}</strong>
+            <span class="budget-status-pill ${isOver ? "status-over" : "status-under"}">${isOver ? `Over by ${formatMoney(b.actual_minor - b.budget_minor, b.currency)}` : `Remaining: ${formatMoney(b.remaining_minor, b.currency)}`}</span>
           </div>
           <div class="budget-bar-wrap">
             <div class="budget-bar-fill ${isOver ? "is-over" : ""}" style="width:${pct}%"></div>
           </div>
           <div class="budget-foot">
-            <span>Spent: ${formatMoney(b.spent_minor, b.currency)}</span>
-            <span>Allocated: ${formatMoney(b.allocated_minor, b.currency)}</span>
+            <span>Spent: ${formatMoney(b.actual_minor, b.currency)}</span>
+            <span>Budget: ${formatMoney(b.budget_minor, b.currency)}</span>
           </div>
         </div>
       `;
@@ -714,7 +761,7 @@ function renderCategoriesView() {
       return `
         <div class="goal-item">
           <div class="goal-head">
-            <strong>${g.name}</strong>
+            <strong>${escapeHtml(g.name)}</strong>
             <span class="num" style="font-weight:700; font-size:12px;">${formatMoney(g.current_minor, g.currency)} / ${formatMoney(g.target_minor, g.currency)}</span>
           </div>
           <div class="goal-bar-wrap">
@@ -742,7 +789,7 @@ function renderActivityView() {
   const categories = Array.from(new Set(txs.map((t) => t.category).filter(Boolean))).sort();
   const catSelect = $("ledger-category-filter");
   const currentVal = catSelect.value;
-  catSelect.innerHTML = `<option value="">All Categories</option>` + categories.map((c) => `<option value="${c}" ${c === currentVal ? "selected" : ""}>${prettyCategory(c)}</option>`).join("");
+  catSelect.innerHTML = `<option value="">All Categories</option>` + categories.map((c) => `<option value="${escapeHtml(c)}" ${c === currentVal ? "selected" : ""}>${escapeHtml(prettyCategory(c))}</option>`).join("");
 
   const filtered = txs.filter((t) => {
     if (searchTerm) {
@@ -763,19 +810,19 @@ function renderActivityView() {
   }
 
   tbody.innerHTML = filtered.map((t) => {
-    const isOutflow = t.flow_direction === "outflow";
+    const isDebit = t.flow_direction === "debit";
     const amountStr = formatMoney(t.amount_minor, t.currency);
     const sourceClass = t.classification_source === "rule" ? "tag-deterministic" : t.classification_source === "model" ? "tag-model" : "tag-import";
 
     return `
       <tr>
-        <td><span class="num">${t.date || "—"}</span></td>
-        <td><strong>${t.description || "—"}</strong></td>
-        <td>${t.merchant || "—"}</td>
-        <td><span class="category-tag">${prettyCategory(t.category)}</span></td>
-        <td><span class="provenance-tag ${sourceClass}">${t.classification_source || "rule"}</span></td>
-        <td class="ledger-amount ${isOutflow ? "is-outflow" : "is-inflow"}">
-          ${isOutflow ? `−${amountStr}` : `+${amountStr}`}
+        <td><span class="num">${escapeHtml(t.date || "—")}</span></td>
+        <td><strong>${escapeHtml(t.description || "—")}</strong></td>
+        <td>${escapeHtml(t.merchant || "—")}</td>
+        <td><span class="category-tag">${escapeHtml(prettyCategory(t.category))}</span></td>
+        <td><span class="provenance-tag ${sourceClass}">${escapeHtml(t.classification_source || "rule")}</span></td>
+        <td class="ledger-amount ${isDebit ? "is-outflow" : "is-inflow"}">
+          ${isDebit ? `−${amountStr}` : `+${amountStr}`}
         </td>
       </tr>
     `;
@@ -906,7 +953,7 @@ function appendChatMessage(msg) {
 
 function renderFactsUsed(msg) {
   const factsContainer = $("facts-content");
-  const data = state.data[state.month] || FALLBACK_DATA[state.month];
+  const data = state.data[state.month] || { ...EMPTY_MONTH, period: state.month };
 
   factsContainer.innerHTML = `
     <div class="fact-item">
@@ -919,7 +966,7 @@ function renderFactsUsed(msg) {
     </div>
     <div class="fact-item">
       <strong>Top Categories Evaluated</strong>
-      <small>${(data.categories || []).slice(0, 3).map((c) => `${prettyCategory(c.category)}: ${formatMoney(c.total_minor, data.currency)}`).join(", ")}</small>
+      <small>${(data.categories || []).slice(0, 3).map((c) => `${escapeHtml(prettyCategory(c.category))}: ${formatMoney(c.total_minor, data.currency)}`).join(", ")}</small>
     </div>
     <div class="fact-item">
       <strong>Provenance &amp; Source</strong>
@@ -951,7 +998,7 @@ function renderAskView() {
 // MONTH NAVIGATION MENU
 function updateMonthMenu() {
   const menu = $("month-menu");
-  const periods = ["2026-08", "2026-07", "2026-06"];
+  const periods = [state.month, monthShift(state.month, -1), monthShift(state.month, -2)];
   menu.innerHTML = periods.map((p) => `
     <button class="month-option" type="button" role="option" data-period="${p}" aria-selected="${p === state.month}">
       ${monthName(p)}

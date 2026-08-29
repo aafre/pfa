@@ -104,6 +104,7 @@
 
           <!-- VIEW 1: OVERVIEW -->
           <section class="view-panel is-active" id="view-overview" data-view="overview" aria-label="Overview View">
+            <div class="overview-error-banner" id="overview-error-banner" hidden role="alert"></div>
             <section class="metric-band" id="metric-band" aria-label="Financial summary">
               <article class="metric-cell">
                 <div class="metric-head"><span>Total Income</span><span class="metric-marker marker-up" aria-hidden="true">↗</span></div>
@@ -304,6 +305,22 @@
                   </div>
                 </div>
 
+                <!-- AMOUNT SIGN CONVENTION -->
+                <div class="amount-sign-wrap" id="amount-sign-wrap" hidden>
+                  <div class="amount-sign-alert">
+                    <span class="alert-icon" aria-hidden="true">⚠️</span>
+                    <div class="amount-sign-content">
+                      <strong>All amounts are positive — how should PFA interpret them?</strong>
+                      <p>Some banks export charges as positive numbers. Choose the correct convention to ensure spending is recorded correctly.</p>
+                      <select id="amount-sign-select" class="select-input" aria-label="Amount sign convention">
+                        <option value="">— Select sign convention —</option>
+                        <option value="as_written">As written (positive = credit/income)</option>
+                        <option value="debit_positive">Debit-positive (positive = charge/spending)</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
                 <!-- BATCH STATS & FILTERS -->
                 <div class="batch-metrics-bar">
                   <div class="batch-filter-tabs" role="tablist">
@@ -445,8 +462,8 @@
                   </select>
                   <select id="ledger-direction-filter" class="select-input" aria-label="Filter by direction">
                     <option value="">All Flows</option>
-                    <option value="outflow">Spending Only</option>
-                    <option value="inflow">Income Only</option>
+                    <option value="debit">Spending Only</option>
+                    <option value="credit">Income Only</option>
                   </select>
                 </div>
               </div>
