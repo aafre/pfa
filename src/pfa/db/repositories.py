@@ -1,13 +1,20 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from pfa.domain.transactions import TransactionKind
 
-from .models import AccountModel, BudgetModel, GoalModel, MerchantRuleModel, TransactionModel
+from .models import (
+    AccountModel,
+    BudgetModel,
+    GoalModel,
+    ImportBatchModel,
+    MerchantRuleModel,
+    TransactionModel,
+)
 
 
 class TransactionRepository:
@@ -108,6 +115,27 @@ class BudgetRepository:
         self.session.add(budget)
         self.session.flush()
         return budget
+
+
+class ImportBatchRepository:
+    def __init__(self, session: Session):
+        self.session = session
+
+    def get(self, batch_id: str) -> ImportBatchModel | None:
+        return self.session.get(ImportBatchModel, batch_id)
+
+    def add(self, batch: ImportBatchModel) -> ImportBatchModel:
+        self.session.add(batch)
+        self.session.flush()
+        return batch
+
+    def list_expired(self, at: datetime) -> list[ImportBatchModel]:
+        """Batches still holding staged candidate data whose TTL has passed."""
+        statement = select(ImportBatchModel).where(
+            ImportBatchModel.expires_at <= at,
+            ImportBatchModel.status.in_(["preview_ready", "blocked"]),
+        )
+        return list(self.session.scalars(statement))
 
 
 class GoalRepository:

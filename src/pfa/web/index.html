@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#16252e" />
+    <title>PFA — Personal Finance Agent</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Primary navigation">
+        <a class="brand" href="#overview" aria-label="PFA overview">
+          <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+          <span>
+            <strong>PFA</strong>
+            <small>personal finance agent</small>
+          </span>
+        </a>
+
+        <div class="sidebar-rule"></div>
+        <p class="nav-label">Workspace</p>
+        <nav class="nav-list" aria-label="Main Navigation">
+          <a class="nav-item is-active" href="#overview" data-route="overview">
+            <span class="nav-icon nav-icon-overview" aria-hidden="true"></span>
+            <span>Overview</span>
+          </a>
+          <a class="nav-item" href="#import" data-route="import">
+            <span class="nav-icon nav-icon-import" aria-hidden="true"></span>
+            <span>Import Statement</span>
+            <span class="nav-pill" id="nav-import-status" hidden>Ready</span>
+          </a>
+          <a class="nav-item" href="#categories" data-route="categories">
+            <span class="nav-icon nav-icon-plan" aria-hidden="true"></span>
+            <span>Categories &amp; Budgets</span>
+          </a>
+          <a class="nav-item" href="#activity" data-route="activity">
+            <span class="nav-icon nav-icon-activity" aria-hidden="true"></span>
+            <span>Activity Ledger</span>
+            <span class="nav-count" id="nav-tx-count">0</span>
+          </a>
+          <a class="nav-item" href="#ask" data-route="ask">
+            <span class="nav-icon nav-icon-ask" aria-hidden="true"></span>
+            <span>Ask PFA (AI Chat)</span>
+          </a>
+        </nav>
+
+        <div class="sidebar-bottom">
+          <div class="local-status">
+            <span class="status-dot" id="system-status-dot"></span>
+            <div>
+              <strong id="system-status-title">Local &amp; Private</strong>
+              <small id="system-status-desc">Zero cloud telemetry</small>
+            </div>
+          </div>
+          <div class="profile-info">
+            <span class="avatar">JM</span>
+            <div class="profile-meta">
+              <strong>Personal Ledger</strong>
+              <small id="active-account-label">Main Account</small>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main-content" id="main-content">
+        <header class="topbar">
+          <div class="breadcrumb">
+            <span>Workspace</span>
+            <span class="crumb-slash">/</span>
+            <strong id="current-view-title">Overview</strong>
+          </div>
+          <div class="topbar-actions">
+            <span class="sync-note" id="sync-note">
+              <span class="sync-pulse"></span>
+              <span id="sync-text">Local database connected</span>
+            </span>
+            <div class="model-badge" id="topbar-model-badge" title="Local Model Status">
+              <span class="model-dot"></span>
+              <span id="topbar-model-text">AI Advisor Ready</span>
+            </div>
+          </div>
+        </header>
+
+        <div class="content-wrap">
+          <!-- SHARED MONTH CONTROLS BAR -->
+          <section class="page-heading" id="month-heading-section" aria-labelledby="page-title">
+            <div>
+              <p class="eyebrow" id="view-eyebrow">Monthly position</p>
+              <h1 id="page-title">Money, in view.</h1>
+              <p class="lede" id="view-lede">A clear read on what changed, what matters, and where to look next.</p>
+            </div>
+            <div class="month-controls" aria-label="Choose period">
+              <button class="month-arrow" type="button" data-month-step="-1" aria-label="Previous month">←</button>
+              <button class="month-current" type="button" id="month-current" aria-haspopup="listbox" aria-expanded="false">
+                <span class="calendar-mini" aria-hidden="true"></span>
+                <span id="month-label">August 2026</span>
+                <span class="chevron" aria-hidden="true">⌄</span>
+              </button>
+              <button class="month-arrow" type="button" data-month-step="1" aria-label="Next month">→</button>
+              <div class="month-menu" id="month-menu" role="listbox" aria-label="Available months" hidden></div>
+            </div>
+          </section>
+
+          <!-- VIEW 1: OVERVIEW -->
+          <section class="view-panel is-active" id="view-overview" data-view="overview" aria-label="Overview View">
+            <section class="metric-band" id="metric-band" aria-label="Financial summary">
+              <article class="metric-cell">
+                <div class="metric-head"><span>Total Income</span><span class="metric-marker marker-up" aria-hidden="true">↗</span></div>
+                <strong class="metric-value" id="income-value">£0.00</strong>
+                <span class="metric-foot" id="income-change">Calculating</span>
+              </article>
+              <article class="metric-cell metric-cell-spend">
+                <div class="metric-head"><span>Total Spending</span><span class="metric-marker marker-warn" aria-hidden="true">↗</span></div>
+                <strong class="metric-value" id="spending-value">£0.00</strong>
+                <span class="metric-foot is-warn" id="spending-change">Calculating</span>
+              </article>
+              <article class="metric-cell">
+                <div class="metric-head"><span>Net Cashflow</span><span class="metric-marker marker-down" id="net-marker" aria-hidden="true">↘</span></div>
+                <strong class="metric-value" id="net-value">£0.00</strong>
+                <span class="metric-foot" id="net-change">Calculating</span>
+              </article>
+              <article class="metric-cell">
+                <div class="metric-head"><span>Savings Rate</span><span class="metric-marker marker-neutral" aria-hidden="true">—</span></div>
+                <strong class="metric-value" id="rate-value">0.0%</strong>
+                <span class="metric-foot" id="rate-change">Calculating</span>
+              </article>
+            </section>
+
+            <div class="content-grid">
+              <div class="review-column">
+                <div class="section-heading">
+                  <div>
+                    <p class="eyebrow">Deterministic calculations</p>
+                    <h2 id="review-heading">Monthly review</h2>
+                  </div>
+                  <span class="data-chip"><span class="chip-dot"></span><span id="transaction-count">0</span> transactions</span>
+                </div>
+
+                <article class="audit-panel">
+                  <div class="audit-intro">
+                    <div class="audit-score"><span class="score-number" id="audit-count">02</span><span class="score-label">items to<br />inspect</span></div>
+                    <div>
+                      <h3 id="audit-title">Most of the change is in two places.</h3>
+                      <p id="review-copy">Loading period data...</p>
+                    </div>
+                  </div>
+                  <div class="audit-list" id="audit-list" role="list"></div>
+                  <div class="audit-footer">
+                    <span><span class="evidence-icon" aria-hidden="true">⌁</span> Deterministic SQL ledger analysis</span>
+                    <button type="button" class="text-button" id="open-evidence">Inspect source facts <span aria-hidden="true">→</span></button>
+                  </div>
+                </article>
+
+                <div class="lower-grid">
+                  <section class="category-panel panel" aria-labelledby="category-heading">
+                    <div class="panel-header">
+                      <div>
+                        <p class="eyebrow">Where it went</p>
+                        <h2 id="category-heading">Top Categories</h2>
+                      </div>
+                      <a class="text-button" href="#categories">View all <span aria-hidden="true">→</span></a>
+                    </div>
+                    <div class="category-chart" id="category-chart" role="img" aria-label="Spending by category bar chart"></div>
+                    <table class="sr-only" id="category-table">
+                      <caption>Spending by category for the selected month</caption>
+                      <thead><tr><th scope="col">Category</th><th scope="col">Amount</th></tr></thead>
+                      <tbody></tbody>
+                    </table>
+                  </section>
+
+                  <section class="cashflow-panel panel" aria-labelledby="cashflow-heading">
+                    <div class="panel-header">
+                      <div>
+                        <p class="eyebrow">Rhythm</p>
+                        <h2 id="cashflow-heading">3-Month Cashflow</h2>
+                      </div>
+                      <span class="trend-label" id="trend-span-label">Jun — Aug</span>
+                    </div>
+                    <div class="cashflow-chart" role="img" aria-label="Income and spending 3-month trend">
+                      <div class="chart-grid"><span></span><span></span><span></span></div>
+                      <div class="chart-bars" id="cashflow-bars"></div>
+                    </div>
+                    <div class="legend-row">
+                      <span><i class="legend-swatch swatch-green"></i>Income</span>
+                      <span><i class="legend-swatch swatch-orange"></i>Spending</span>
+                    </div>
+                  </section>
+                </div>
+              </div>
+
+              <aside class="side-column" aria-label="System Health and Actions">
+                <section class="prompt-panel">
+                  <span class="prompt-spark" aria-hidden="true">✳</span>
+                  <p class="eyebrow">AI Financial Advisor</p>
+                  <h2>Ask about this month</h2>
+                  <p>Ask natural-language questions with verified deterministic evidence.</p>
+                  <button class="prompt-button" type="button" id="overview-go-ask">
+                    Open Ask PFA <span aria-hidden="true">→</span>
+                  </button>
+                </section>
+
+                <section class="health-panel panel">
+                  <div class="health-header">
+                    <span class="health-mark" aria-hidden="true">✓</span>
+                    <div>
+                      <p class="eyebrow">System status</p>
+                      <h2>Privacy &amp; Data</h2>
+                    </div>
+                    <span class="health-status" id="health-status">Healthy</span>
+                  </div>
+                  <p class="health-copy">Calculations are deterministic and verified against your local SQLite database.</p>
+                  <div class="health-meta">
+                    <span><span class="tiny-dot"></span>Database</span>
+                    <strong id="database-status">Connected</strong>
+                  </div>
+                  <div class="health-meta">
+                    <span><span class="tiny-dot"></span>Local Model</span>
+                    <strong id="model-status">Checking...</strong>
+                  </div>
+                  <div class="health-meta">
+                    <span><span class="tiny-dot"></span>Active Statements</span>
+                    <strong id="statements-status">Ready</strong>
+                  </div>
+                </section>
+
+                <section class="queue-panel panel" aria-labelledby="quick-import-heading">
+                  <div class="panel-header">
+                    <div>
+                      <p class="eyebrow">Quick Action</p>
+                      <h2 id="quick-import-heading">Import Statement</h2>
+                    </div>
+                  </div>
+                  <p class="panel-desc">Upload bank PDF, CSV, or scanned statements to update your ledger.</p>
+                  <a class="action-tile-button" href="#import">
+                    <span>Upload Bank Statement</span>
+                    <span aria-hidden="true">→</span>
+                  </a>
+                </section>
+              </aside>
+            </div>
+          </section>
+
+          <!-- VIEW 2: STATEMENT UPLOAD & BATCH INSPECTOR -->
+          <section class="view-panel" id="view-import" data-view="import" aria-label="Import Statement View" hidden>
+            <div class="view-container">
+              <!-- DROPZONE CARD -->
+              <div class="upload-box-card" id="upload-card">
+                <div class="upload-dropzone" id="dropzone" tabindex="0" role="button" aria-label="Click or drag and drop bank statement here">
+                  <input type="file" id="statement-file-input" accept=".csv,.pdf,.txt" class="sr-only" aria-label="Select statement file" />
+                  <div class="dropzone-inner">
+                    <div class="dropzone-icon" aria-hidden="true">
+                      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="17 8 12 3 7 8"></polyline>
+                        <line x1="12" y1="3" x2="12" y2="15"></line>
+                      </svg>
+                    </div>
+                    <div class="dropzone-text">
+                      <h3>Drag &amp; drop bank statement here</h3>
+                      <p>Supports <strong>PDF Statements</strong>, <strong>CSV exports</strong>, or <strong>scanned documents</strong></p>
+                    </div>
+                    <button class="button-primary" type="button" id="browse-button">
+                      Browse Files
+                    </button>
+                    <div class="dropzone-formats">
+                      <span class="format-pill">PDF with native text</span>
+                      <span class="format-pill">PDF with OCR fallback</span>
+                      <span class="format-pill">Bank CSV exports</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="upload-progress-bar" id="upload-progress" hidden>
+                  <div class="spinner" aria-hidden="true"></div>
+                  <div class="progress-details">
+                    <strong id="progress-text">Extracting candidates from statement...</strong>
+                    <small>Parsing transaction rows and detecting account structure</small>
+                  </div>
+                </div>
+              </div>
+
+              <!-- BATCH PREVIEW INSPECTOR (SHOWN AFTER UPLOAD) -->
+              <div class="batch-inspector" id="batch-inspector" hidden>
+                <div class="inspector-header">
+                  <div class="inspector-title-wrap">
+                    <span class="status-pill status-ready" id="batch-status-badge">Preview Ready</span>
+                    <h2 id="batch-filename">statement.pdf</h2>
+                    <div class="batch-meta-chips" id="batch-meta-chips">
+                      <span class="meta-chip">Extractor: <strong id="batch-extractor">pdf:table</strong></span>
+                      <span class="meta-chip">Currency: <strong id="batch-currency">GBP</strong></span>
+                      <span class="meta-chip">Pages: <strong id="batch-pages">1</strong></span>
+                      <span class="meta-chip">Period: <strong id="batch-period">Auto</strong></span>
+                    </div>
+                  </div>
+
+                  <div class="account-selector-wrap">
+                    <label for="destination-account-input" class="account-label">Target Account:</label>
+                    <div class="account-input-group">
+                      <input list="known-accounts-list" id="destination-account-input" class="text-input" placeholder="e.g. Main Checking" />
+                      <datalist id="known-accounts-list"></datalist>
+                      <button class="button-secondary" type="button" id="save-account-btn">Assign</button>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- BATCH STATS & FILTERS -->
+                <div class="batch-metrics-bar">
+                  <div class="batch-filter-tabs" role="tablist">
+                    <button class="filter-tab is-active" type="button" role="tab" data-filter="all" id="tab-all">
+                      All <span class="tab-badge" id="count-total">0</span>
+                    </button>
+                    <button class="filter-tab" type="button" role="tab" data-filter="valid" id="tab-valid">
+                      Valid <span class="tab-badge badge-green" id="count-valid">0</span>
+                    </button>
+                    <button class="filter-tab" type="button" role="tab" data-filter="warning" id="tab-warning">
+                      Warnings <span class="tab-badge badge-amber" id="count-warning">0</span>
+                    </button>
+                    <button class="filter-tab" type="button" role="tab" data-filter="duplicate" id="tab-duplicate">
+                      Duplicates <span class="tab-badge badge-neutral" id="count-duplicate">0</span>
+                    </button>
+                    <button class="filter-tab" type="button" role="tab" data-filter="excluded" id="tab-excluded">
+                      Excluded <span class="tab-badge badge-neutral" id="count-excluded">0</span>
+                    </button>
+                  </div>
+
+                  <div class="batch-bulk-actions">
+                    <button class="button-ghost" type="button" id="select-all-candidates">Include All</button>
+                    <button class="button-ghost" type="button" id="deselect-all-candidates">Exclude All</button>
+                  </div>
+                </div>
+
+                <!-- BATCH ISSUES BANNER (IF ANY) -->
+                <div class="batch-issues-alert" id="batch-issues-alert" hidden>
+                  <span class="alert-icon">⚠️</span>
+                  <div class="alert-content" id="batch-issues-content"></div>
+                </div>
+
+                <!-- CANDIDATES TABLE -->
+                <div class="table-responsive">
+                  <table class="candidates-table" aria-label="Statement Candidates Review">
+                    <thead>
+                      <tr>
+                        <th scope="col" class="th-check"><span class="sr-only">Include</span></th>
+                        <th scope="col">Date</th>
+                        <th scope="col">Description / Merchant</th>
+                        <th scope="col">Category</th>
+                        <th scope="col" class="th-right">Amount</th>
+                        <th scope="col">Status &amp; Flags</th>
+                      </tr>
+                    </thead>
+                    <tbody id="candidates-tbody">
+                      <!-- Rendered by app.js -->
+                    </tbody>
+                  </table>
+                </div>
+
+                <!-- BATCH ACTION CONTROLS -->
+                <div class="inspector-footer">
+                  <button class="button-destructive" type="button" id="discard-batch-btn">
+                    Discard Batch
+                  </button>
+                  <div class="footer-commit-wrap">
+                    <span class="commit-note" id="commit-summary-note">Ready to commit 0 transactions</span>
+                    <button class="button-primary" type="button" id="commit-batch-btn">
+                      Commit to Ledger <span aria-hidden="true">✓</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- BATCH SUCCESS CARD (AFTER COMMIT) -->
+              <div class="batch-success-card panel" id="batch-success-card" hidden>
+                <div class="success-icon" aria-hidden="true">✓</div>
+                <div class="success-content">
+                  <h2>Statement Successfully Imported!</h2>
+                  <p id="success-message">3 transactions committed to your ledger.</p>
+                  <div class="success-actions">
+                    <a class="button-primary" href="#overview">View Updated Overview</a>
+                    <a class="button-secondary" href="#activity">View Activity Ledger</a>
+                    <button class="button-ghost" type="button" id="upload-another-btn">Upload Another Statement</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- VIEW 3: CATEGORIES & BUDGETS -->
+          <section class="view-panel" id="view-categories" data-view="categories" aria-label="Categories & Budgets View" hidden>
+            <div class="categories-layout">
+              <!-- CATEGORY BREAKDOWN -->
+              <section class="panel category-detail-panel">
+                <div class="panel-header">
+                  <div>
+                    <p class="eyebrow">Monthly Breakdown</p>
+                    <h2>Spending by Category</h2>
+                  </div>
+                  <span class="data-chip" id="categories-total-chip">Total Spend: £0.00</span>
+                </div>
+                <div class="category-breakdown-list" id="category-breakdown-list">
+                  <!-- Category items rendered here -->
+                </div>
+              </section>
+
+              <!-- BUDGETS & GOALS COLUMN -->
+              <div class="plan-sidebar-column">
+                <section class="panel budgets-panel">
+                  <div class="panel-header">
+                    <div>
+                      <p class="eyebrow">Limits &amp; Tracking</p>
+                      <h2>Category Budgets</h2>
+                    </div>
+                  </div>
+                  <div class="budgets-list" id="budgets-list">
+                    <!-- Budgets rendered here -->
+                  </div>
+                </section>
+
+                <section class="panel goals-panel">
+                  <div class="panel-header">
+                    <div>
+                      <p class="eyebrow">Long-term targets</p>
+                      <h2>Financial Goals</h2>
+                    </div>
+                  </div>
+                  <div class="goals-list" id="goals-list">
+                    <!-- Goals rendered here -->
+                  </div>
+                </section>
+              </div>
+            </div>
+          </section>
+
+          <!-- VIEW 4: ACTIVITY / TRANSACTION LEDGER -->
+          <section class="view-panel" id="view-activity" data-view="activity" aria-label="Activity Ledger View" hidden>
+            <section class="panel ledger-panel">
+              <div class="ledger-toolbar">
+                <div class="search-wrap">
+                  <span class="search-icon" aria-hidden="true">🔍</span>
+                  <input type="search" id="ledger-search" class="text-input" placeholder="Search merchant, description..." aria-label="Search transactions" />
+                </div>
+                <div class="ledger-filters">
+                  <select id="ledger-category-filter" class="select-input" aria-label="Filter by category">
+                    <option value="">All Categories</option>
+                  </select>
+                  <select id="ledger-direction-filter" class="select-input" aria-label="Filter by direction">
+                    <option value="">All Flows</option>
+                    <option value="outflow">Spending Only</option>
+                    <option value="inflow">Income Only</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="table-responsive">
+                <table class="ledger-table" aria-label="Transaction Ledger">
+                  <thead>
+                    <tr>
+                      <th scope="col">Date</th>
+                      <th scope="col">Description</th>
+                      <th scope="col">Merchant</th>
+                      <th scope="col">Category</th>
+                      <th scope="col">Provenance</th>
+                      <th scope="col" class="th-right">Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody id="ledger-tbody">
+                    <!-- Transactions rendered here -->
+                  </tbody>
+                </table>
+              </div>
+
+              <div class="ledger-footer">
+                <span id="ledger-count-summary">Showing 0 transactions</span>
+              </div>
+            </section>
+          </section>
+
+          <!-- VIEW 5: ASK PFA (AI CHAT & INVESTIGATION DESK) -->
+          <section class="view-panel" id="view-ask" data-view="ask" aria-label="Ask PFA View" hidden>
+            <div class="ask-layout">
+              <div class="chat-main-column">
+                <!-- SUGGESTED PROMPTS BAR -->
+                <div class="prompt-chips-bar" aria-label="Suggested investigations">
+                  <span class="chips-label">Suggested:</span>
+                  <div class="chips-list" id="prompt-chips">
+                    <button class="prompt-chip" type="button">Why did my spending increase in August?</button>
+                    <button class="prompt-chip" type="button">What are my top spending categories?</button>
+                    <button class="prompt-chip" type="button">How much did I spend on groceries?</button>
+                    <button class="prompt-chip" type="button">Which budgets went over this month?</button>
+                    <button class="prompt-chip" type="button">Can I afford a £350 purchase?</button>
+                  </div>
+                </div>
+
+                <!-- CHAT MESSAGES STREAM -->
+                <div class="chat-stream" id="chat-stream" role="log" aria-live="polite">
+                  <div class="chat-message is-system">
+                    <div class="message-bubble">
+                      <div class="message-head">
+                        <strong>PFA Financial Investigation Desk</strong>
+                        <span class="provenance-tag tag-deterministic">Deterministic Engine Active</span>
+                      </div>
+                      <p>Ask any question about your finances. When possible, answers are calculated directly from your local SQLite ledger with zero hallucination. When using the AI model, facts used are explicitly provided.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- CHAT COMPOSER -->
+                <form class="chat-composer" id="chat-form">
+                  <div class="composer-field-wrap">
+                    <input type="text" id="chat-input" class="chat-input" placeholder="Ask about this month's spending, budget, or transactions..." autocomplete="off" required aria-label="Your financial question" />
+                    <button class="chat-submit-btn button-primary" type="submit" id="chat-submit-btn">
+                      <span>Ask</span>
+                      <span aria-hidden="true">→</span>
+                    </button>
+                  </div>
+                  <div class="composer-note">
+                    <span>Deterministic calculations run locally · Source facts displayed with every answer</span>
+                  </div>
+                </form>
+              </div>
+
+              <!-- FACTS USED / EVIDENCE INSPECTOR COLUMN -->
+              <aside class="facts-inspector-column" id="facts-inspector-column">
+                <section class="panel facts-panel">
+                  <div class="panel-header">
+                    <div>
+                      <p class="eyebrow">Evidence Trail</p>
+                      <h2>Facts &amp; Ledger Data</h2>
+                    </div>
+                  </div>
+                  <div class="facts-content" id="facts-content">
+                    <div class="facts-empty-state">
+                      <p>Ask a question or click on an answer to inspect the exact transactions and deterministic numbers used.</p>
+                    </div>
+                  </div>
+                </section>
+              </aside>
+            </div>
+          </section>
+
+          <footer class="page-footer">
+            <span>PFA <span aria-hidden="true">·</span> Evidence over guesswork</span>
+            <span>Local privacy assured <span aria-hidden="true">·</span> SQLite deterministic engine</span>
+          </footer>
+        </div>
+      </main>
+    </div>
+
+    <!-- EVIDENCE MODAL (OVERVIEW) -->
+    <dialog class="evidence-dialog" id="evidence-dialog" aria-labelledby="dialog-title">
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">Traceable by design</p>
+          <h2 id="dialog-title">Evidence used</h2>
+        </div>
+        <button class="dialog-close" type="button" aria-label="Close evidence">×</button>
+      </div>
+      <p class="dialog-lede">Every insight below is calculated from the local transaction ledger. Nothing here depends on a model guess.</p>
+      <div class="evidence-detail" id="evidence-detail"></div>
+      <div class="dialog-actions">
+        <button class="button-secondary dialog-close" type="button">Close</button>
+        <a class="button-primary" href="#activity" id="dialog-view-activity">Open Activity Ledger <span aria-hidden="true">→</span></a>
+      </div>
+    </dialog>
+
+    <!-- TOAST NOTIFICATION -->
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

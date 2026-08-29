@@ -48,3 +48,53 @@ def test_alembic_schema_matches_models_and_downgrades_cleanly(tmp_path) -> None:
     engine = make_engine(Settings(database_url=database_url))
     assert set(inspect(engine).get_table_names()) <= {"alembic_version"}
     engine.dispose()
+
+
+def test_import_batches_migration_adds_and_removes_only_its_own_table(tmp_path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'batches.db'}"
+    migrate(database_url, "0001_initial")
+    engine = make_engine(Settings(database_url=database_url))
+    tables_before = set(inspect(engine).get_table_names())
+    assert "import_batches" not in tables_before
+    engine.dispose()
+
+    migrate(database_url, "0002_import_batches")
+    engine = make_engine(Settings(database_url=database_url))
+    inspector = inspect(engine)
+    assert "import_batches" in inspector.get_table_names()
+    columns = {column["name"] for column in inspector.get_columns("import_batches")}
+    assert columns == {
+        "id",
+        "original_filename",
+        "media_type",
+        "size_bytes",
+        "sha256",
+        "extractor",
+        "status",
+        "destination_account",
+        "detected_account",
+        "detected_currency",
+        "statement_start",
+        "statement_end",
+        "page_count",
+        "candidates_json",
+        "issues_json",
+        "counts_json",
+        "committed_transaction_ids_json",
+        "created_at",
+        "updated_at",
+        "expires_at",
+        "committed_at",
+    }
+    index_names = {index["name"] for index in inspector.get_indexes("import_batches")}
+    assert "ix_import_batches_status" in index_names
+    engine.dispose()
+
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.downgrade(config, "0001_initial")
+    engine = make_engine(Settings(database_url=database_url))
+    tables_after_downgrade = set(inspect(engine).get_table_names())
+    assert "import_batches" not in tables_after_downgrade
+    assert tables_after_downgrade == tables_before
+    engine.dispose()

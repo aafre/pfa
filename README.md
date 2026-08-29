@@ -228,6 +228,29 @@ uv run pfa goals add "Emergency fund" 10000 --type emergency_fund
 `pfa import` reports malformed rows and leaves unresolved expenses marked for review if Ollama
 is unavailable. Repeat imports are safe. Use `--dry-run` to validate without persistence.
 
+## Statement ingestion
+
+### Available now
+
+- `pfa import <path.csv>` imports a local UTF-8 CSV through the CLI; `--dry-run` validates without
+  persistence.
+- The CSV adapter accepts common aliases for date, description, amount, account, and transaction ID.
+  It supports signed amounts, several UK/US date formats, row-level errors, duplicate detection, and
+  manual review for unresolved classifications.
+- Version 0.1 is GBP-only. Bank-specific debit/credit columns may require conversion to a signed
+  `amount` column.
+- `POST /imports` currently accepts a server-local CSV path. It is not a browser file-upload endpoint.
+- The dashboard's Import navigation item is a placeholder; users cannot yet upload statements from
+  the browser.
+
+### Planned statement upload
+
+The next ingestion slice adds browser upload, preview-before-commit, actionable row errors, import
+history, and adapters for CSV and PDF statements. Digital PDFs use native text/table extraction first;
+scanned pages may fall back to local Tesseract OCR. OCR-derived financial values require explicit review,
+and unsupported or unreadable layouts must fail clearly without changing financial state. See the
+[statement upload and PDF extraction requirements](docs/plans/2026-08-28-statement-upload-pdf-extraction-design.md).
+
 ## API
 
 ```bash
@@ -261,10 +284,11 @@ remain local, and logs avoid raw transaction payloads. The initial API assumes d
 binding and has no authentication platform. PFA is advisory and read-only: it cannot transfer
 money, execute trades, initiate payments, alter bank accounts, or promise investment returns.
 
-Current limitations include bank-specific CSV quirks, manual handling of opening balances, and
+Current limitations include the absence of browser uploads and PDF extraction, bank-specific CSV
+quirks, manual handling of opening balances, and
 heuristic recurring/anomaly detection. Recurring evidence supports weekly, monthly, and quarterly
-cadences; annual schedules and missing-month recovery are not inferred. Future work: richer import
-adapters, a local review UI, stronger evals for groundedness, and opt-in audit logs for any future
+cadences; annual schedules and missing-month recovery are not inferred. Future work: the statement
+upload slice described above, stronger evals for groundedness, and opt-in audit logs for any future
 write proposal flow. Version 0.1 is GBP-only and rejects other currencies rather than summing them.
 Exact same-day duplicates without bank external IDs are preserved within a file by occurrence order;
 across partial/overlapping files, external IDs remain the only unambiguous identity. Rows unresolved
