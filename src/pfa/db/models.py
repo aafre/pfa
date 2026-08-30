@@ -63,6 +63,42 @@ class TransactionModel(Base):
     account: Mapped[AccountModel] = relationship(back_populates="transactions")
 
 
+class TransferEventModel(Base):
+    __tablename__ = "transfer_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    purpose: Mapped[str] = mapped_column(String(30), default="other")
+    match_method: Mapped[str] = mapped_column(String(30))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    legs: Mapped[list[TransferLegModel]] = relationship(
+        back_populates="event", cascade="all, delete-orphan"
+    )
+
+
+class TransferLegModel(Base):
+    __tablename__ = "transfer_legs"
+    __table_args__ = (UniqueConstraint("transaction_id", name="uq_transfer_legs_transaction"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("transfer_events.id"))
+    transaction_id: Mapped[int] = mapped_column(ForeignKey("transactions.id"))
+    role: Mapped[str] = mapped_column(String(20))
+    event: Mapped[TransferEventModel] = relationship(back_populates="legs")
+
+
+class TransferMatchDecisionModel(Base):
+    __tablename__ = "transfer_match_decisions"
+    __table_args__ = (UniqueConstraint("stable_match_key", name="uq_transfer_match_key"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    stable_match_key: Mapped[str] = mapped_column(String(64))
+    left_transaction_id: Mapped[int] = mapped_column(ForeignKey("transactions.id"))
+    right_transaction_id: Mapped[int] = mapped_column(ForeignKey("transactions.id"))
+    state: Mapped[str] = mapped_column(String(20))
+    confidence: Mapped[float] = mapped_column()
+    reason_codes_json: Mapped[str] = mapped_column(Text, default="[]")
+    event_id: Mapped[int | None] = mapped_column(ForeignKey("transfer_events.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class BudgetModel(Base):
     __tablename__ = "budgets"
     id: Mapped[int] = mapped_column(primary_key=True)

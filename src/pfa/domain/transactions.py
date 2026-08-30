@@ -39,6 +39,18 @@ class ClassificationSource(StrEnum):
     UNKNOWN = "unknown"
 
 
+class TransferLegRole(StrEnum):
+    SOURCE = "source"
+    DESTINATION = "destination"
+    FEE = "fee"
+
+
+class TransferMatchState(StrEnum):
+    SUGGESTED = "suggested"
+    ACCEPTED = "accepted"
+    DISMISSED = "dismissed"
+
+
 class TransferPurpose(StrEnum):
     SAVING = "saving"
     INVESTMENT = "investment"

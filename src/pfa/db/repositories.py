@@ -18,6 +18,9 @@ from .models import (
     ImportBatchModel,
     MerchantRuleModel,
     TransactionModel,
+    TransferEventModel,
+    TransferLegModel,
+    TransferMatchDecisionModel,
 )
 
 
@@ -195,6 +198,71 @@ class ImportBatchRepository:
             ImportBatchModel.status.in_(["preview_ready", "blocked"]),
         )
         return list(self.session.scalars(statement))
+
+
+class TransferRepository:
+    def __init__(self, session: Session):
+        self.session = session
+
+    def linked_transaction_ids(self) -> set[int]:
+        return set(self.session.scalars(select(TransferLegModel.transaction_id)))
+
+    def decision(self, stable_match_key: str) -> TransferMatchDecisionModel | None:
+        return self.session.scalar(
+            select(TransferMatchDecisionModel).where(
+                TransferMatchDecisionModel.stable_match_key == stable_match_key
+            )
+        )
+
+    def add_event(
+        self, event: TransferEventModel, legs: list[TransferLegModel]
+    ) -> TransferEventModel:
+        event.legs = legs
+        self.session.add(event)
+        self.session.flush()
+        return event
+
+    def add_decision(self, decision: TransferMatchDecisionModel) -> TransferMatchDecisionModel:
+        self.session.add(decision)
+        self.session.flush()
+        return decision
+
+    def suggestions(self) -> list[TransferMatchDecisionModel]:
+        return list(
+            self.session.scalars(
+                select(TransferMatchDecisionModel).where(
+                    TransferMatchDecisionModel.state == "suggested"
+                )
+            )
+        )
+
+    def delete_for_transactions(self, transaction_ids: set[int]) -> None:
+        if not transaction_ids:
+            return
+        legs = list(
+            self.session.scalars(
+                select(TransferLegModel).where(TransferLegModel.transaction_id.in_(transaction_ids))
+            )
+        )
+        event_ids = {leg.event_id for leg in legs}
+        for leg in legs:
+            self.session.delete(leg)
+        for event_id in event_ids:
+            remaining = self.session.scalar(
+                select(TransferLegModel.id).where(TransferLegModel.event_id == event_id).limit(1)
+            )
+            if remaining is None:
+                event = self.session.get(TransferEventModel, event_id)
+                if event is not None:
+                    self.session.delete(event)
+        decisions = self.session.scalars(
+            select(TransferMatchDecisionModel).where(
+                (TransferMatchDecisionModel.left_transaction_id.in_(transaction_ids))
+                | (TransferMatchDecisionModel.right_transaction_id.in_(transaction_ids))
+            )
+        )
+        for decision in decisions:
+            self.session.delete(decision)
 
 
 class GoalRepository:

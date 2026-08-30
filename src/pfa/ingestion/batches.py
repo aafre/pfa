@@ -43,6 +43,8 @@ from .candidates import (
     GENERIC_SIGN_CONFIRMATION_REQUIRED,
     INVALID_ACCOUNT_DRAFT,
     NO_USABLE_ROWS,
+    RECONCILIATION_INCOMPLETE,
+    RECONCILIATION_MISMATCH,
     STATEMENT_YEAR_INFERRED,
     TOO_MANY_ROWS,
     VALID,
@@ -99,13 +101,14 @@ class NewAccountDraft:
     @classmethod
     def from_dict(cls, value: dict[str, object]) -> NewAccountDraft:
         as_of = value.get("opening_balance_as_of")
+        opening = value.get("opening_balance_minor", 0)
         return cls(
             name=str(value.get("name", "")),
             account_type=str(value.get("account_type", AccountType.CURRENT.value)),
             currency=str(value.get("currency", "GBP")),
             institution=str(value["institution"]) if value.get("institution") else None,
             last4=str(value["last4"]) if value.get("last4") else None,
-            opening_balance_minor=int(value.get("opening_balance_minor", 0)),
+            opening_balance_minor=int(str(opening)),
             opening_balance_as_of=date.fromisoformat(str(as_of)) if as_of else None,
         )
 
@@ -295,6 +298,8 @@ _BINDING_CODES = {
     ACCOUNT_TYPE_MISMATCH,
     INVALID_ACCOUNT_DRAFT,
     GENERIC_SIGN_CONFIRMATION_REQUIRED,
+    RECONCILIATION_INCOMPLETE,
+    RECONCILIATION_MISMATCH,
 }
 
 
@@ -415,11 +420,48 @@ def _binding_issues(
     return issues
 
 
+def _reconciliation_account_type(batch: ImportBatchModel, uow: UnitOfWork) -> AccountType:
+    if batch.destination_account_id is not None:
+        account = uow.accounts.get(batch.destination_account_id)
+        if account is not None:
+            try:
+                return AccountType(account.account_type)
+            except ValueError:
+                return AccountType.CURRENT
+    draft = _draft_from_batch(batch)
+    if draft is not None:
+        try:
+            return AccountType(draft.account_type)
+        except ValueError:
+            return AccountType.CURRENT
+    return AccountType.CURRENT
+
+
+def _set_reconciliation(
+    batch: ImportBatchModel,
+    candidates: list[CandidateTransaction],
+    uow: UnitOfWork,
+) -> list[CandidateIssue]:
+    from .reconciliation import reconcile_candidates
+
+    result = reconcile_candidates(candidates, _reconciliation_account_type(batch, uow))
+    batch.reconciliation_json = json.dumps(result)
+    if batch.adapter_id not in (None, "generic"):
+        if result["status"] == "mismatch":
+            return [CandidateIssue(RECONCILIATION_MISMATCH, "statement balances do not reconcile")]
+        if result["status"] == "incomplete":
+            return [
+                CandidateIssue(RECONCILIATION_INCOMPLETE, "not every statement row is included")
+            ]
+    return []
+
+
 def _set_batch_issues(
     batch: ImportBatchModel, uow: UnitOfWork, dialect: Dialect, base: list[CandidateIssue]
 ) -> None:
     issues = [issue for issue in base if issue.code not in _BINDING_CODES]
     issues.extend(_binding_issues(batch, uow, dialect))
+    issues.extend(_set_reconciliation(batch, batch_candidates(batch), uow))
     batch.issues_json = json.dumps([asdict(issue) for issue in issues])
     batch.status = (
         "blocked" if any(issue.severity == ERROR for issue in issues) else "preview_ready"
@@ -745,6 +787,9 @@ def commit_batch(uow: UnitOfWork, batch_id: str, settings: Settings) -> ImportBa
         source_label=f"upload:{batch.id}",
         destination_account_id=account.id if account is not None else None,
     )
+    from .transfers import match_transfers
+
+    match_transfers(uow)
 
     batch.status = "committed"
     batch.committed_at = _now()

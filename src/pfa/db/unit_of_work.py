@@ -8,6 +8,7 @@ from .repositories import (
     ImportBatchRepository,
     RuleRepository,
     TransactionRepository,
+    TransferRepository,
 )
 
 
@@ -22,4 +23,5 @@ class UnitOfWork:
         self.budgets = BudgetRepository(session)
         self.goals = GoalRepository(session)
         self.import_batches = ImportBatchRepository(session)
+        self.transfers = TransferRepository(session)
         self.fx_rates = FxRateRepository(session)
