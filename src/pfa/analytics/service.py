@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import calendar
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 from pfa.db.models import AccountModel, TransactionModel
-from pfa.db.repositories import BudgetRepository, GoalRepository, TransactionRepository
-from pfa.domain.accounts import NON_CASH_ACCOUNT_TYPES
-from pfa.domain.transactions import SpendingCategory, TransactionKind, TransferPurpose
+from pfa.db.repositories import (
+    AccountRepository,
+    BudgetRepository,
+    GoalRepository,
+    TransactionRepository,
+)
+from pfa.domain.accounts import LIQUID_CASH_ACCOUNT_TYPES, AccountType
+from pfa.domain.transactions import SpendingCategory, TransactionKind, TransferPurpose, signed_minor
 
 from .anomalies import category_spikes, unusual_transactions
 from .recurring import detect_recurring
@@ -39,6 +45,15 @@ _SPENDING_KINDS = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class CashPosition:
+    total_minor: int | None
+    known_subtotal_minor: int
+    coverage_status: str
+    missing_account_ids: tuple[int, ...]
+    currency: str
+
+
 def month_bounds(period: date) -> tuple[date, date]:
     start = period.replace(day=1)
     return start, period.replace(day=calendar.monthrange(period.year, period.month)[1])
@@ -64,11 +79,27 @@ def _cash_delta(transaction: TransactionModel) -> int:
 
 class AnalyticsService:
     def __init__(
-        self, transactions: TransactionRepository, budgets: BudgetRepository, goals: GoalRepository
+        self,
+        transactions: TransactionRepository,
+        budgets: BudgetRepository,
+        goals: GoalRepository,
+        accounts: AccountRepository | None = None,
     ):
         self.transactions = transactions
         self.budgets = budgets
         self.goals = goals
+        self.accounts = accounts
+
+    def _account_type(self, transaction: TransactionModel) -> AccountType | None:
+        account = getattr(transaction, "account", None)
+        if account is None and self.accounts is not None:
+            account = self.accounts.get(transaction.account_id)
+        if account is None:
+            return None
+        try:
+            return AccountType(account.account_type)
+        except ValueError:
+            return None
 
     def _filter_currency(
         self, transactions: list[TransactionModel], currency: str
@@ -96,8 +127,16 @@ class AnalyticsService:
             if row.transfer_purpose == TransferPurpose.INVESTMENT.value
             and row.flow_direction == "debit"
         )
-        debt = sum(
+        debt_costs = sum(
             _spending(row) for row in rows if row.category == SpendingCategory.DEBT_PAYMENT.value
+        )
+        debt_repayments = sum(
+            row.amount_minor
+            for row in rows
+            if row.kind == TransactionKind.TRANSFER.value
+            and row.transfer_purpose == TransferPurpose.CREDIT_CARD_PAYMENT.value
+            and signed_minor(row.amount_minor, row.flow_direction) > 0
+            and self._account_type(row) == AccountType.CREDIT_CARD
         )
         rate = (
             float(
@@ -117,7 +156,9 @@ class AnalyticsService:
             discretionary_spending_minor=spending - essential,
             savings_minor=savings,
             investments_minor=investments,
-            debt_payments_minor=debt,
+            debt_payments_minor=debt_costs,
+            debt_repayments_minor=debt_repayments,
+            debt_costs_minor=debt_costs,
             net_cashflow_minor=income - spending,
             savings_rate_percent=rate,
             transaction_count=len(rows),
@@ -263,22 +304,59 @@ class AnalyticsService:
         return category_trend(rows, category, as_of, months)
 
 
+def cash_position(
+    accounts: list[AccountModel],
+    transactions: list[TransactionModel],
+    currency: str = "GBP",
+    as_of: date | None = None,
+) -> CashPosition:
+    curr = currency.upper()
+    liquid = [
+        account
+        for account in accounts
+        if (getattr(account, "currency", None) or "GBP").upper() == curr
+        and AccountType(account.account_type) in LIQUID_CASH_ACCOUNT_TYPES
+    ]
+    missing: list[int] = []
+    subtotal = 0
+    cutoff = as_of or date.max
+    for account in liquid:
+        baseline = account.opening_balance_as_of
+        subtotal += account.opening_balance_minor
+        if baseline is None or cutoff < baseline:
+            missing.append(account.id)
+            # Legacy accounts had no baseline contract. Keep their numeric behavior for
+            # callers such as planning while exposing incomplete coverage to new callers.
+            subtotal += sum(
+                signed_minor(row.amount_minor, row.flow_direction)
+                for row in transactions
+                if row.account_id == account.id and row.transaction_date <= cutoff
+            )
+            continue
+        subtotal += sum(
+            signed_minor(row.amount_minor, row.flow_direction)
+            for row in transactions
+            if row.account_id == account.id
+            and baseline < row.transaction_date <= cutoff
+            and (getattr(row, "currency", None) or "GBP").upper() == curr
+        )
+    return CashPosition(
+        total_minor=None if missing else subtotal,
+        known_subtotal_minor=subtotal,
+        coverage_status="incomplete" if missing else "complete",
+        missing_account_ids=tuple(missing),
+        currency=curr,
+    )
+
+
 def current_cash(
     accounts: list[AccountModel],
     transactions: list[TransactionModel],
     currency: str = "GBP",
     as_of: date | None = None,
 ) -> int:
-    curr = currency.upper()
-    opening = sum(
-        account.opening_balance_minor
-        for account in accounts
-        if account.account_type not in {item.value for item in NON_CASH_ACCOUNT_TYPES}
-        and (getattr(account, "currency", None) or "GBP").upper() == curr
-    )
-    return opening + sum(
-        _cash_delta(row)
-        for row in transactions
-        if (getattr(row, "currency", None) or "GBP").upper() == curr
-        and (as_of is None or row.transaction_date <= as_of)
+    """Compatibility scalar; use ``cash_position`` when coverage matters."""
+    position = cash_position(accounts, transactions, currency=currency, as_of=as_of)
+    return (
+        position.total_minor if position.total_minor is not None else position.known_subtotal_minor
     )
