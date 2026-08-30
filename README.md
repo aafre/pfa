@@ -35,7 +35,7 @@ flowchart LR
 
 - **Local-first ledger** — SQLite is the source of truth; no hosted telemetry or cloud model requirement is implemented.
 - **Deterministic finance engine** — income, spending, savings rate, budgets, goals, recurring evidence, anomalies, trends, and scenarios are calculated in Python from integer minor units.
-- **Statement import studio** — upload CSV or PDF statements in the browser, preview extracted rows,
+- **Statement import studio** — upload CSV, HDFC India Delimited `.txt`, or PDF statements in the browser, preview extracted rows,
   review warnings/errors, exclude rows, state the statement's sign convention, and commit explicitly.
   Commit is blocked while any included row has a blocking error or the sign convention is unanswered.
 - **PDF + OCR path** — digital PDFs use `pdfplumber`; scanned PDF pages can fall back to local Tesseract OCR when installed.
@@ -131,13 +131,13 @@ PFA is strict about money because small mistakes corrupt advice:
 | Path | Supported now | Notes |
 | --- | --- | --- |
 | CLI | Local UTF-8 CSV files | `uv run pfa import <path.csv>`; `--dry-run` validates without persistence. |
-| Browser/API preview | CSV and PDF uploads | `POST /imports/preview` stages a bounded local upload, extracts candidates, and deletes raw uploaded bytes after extraction. |
+| Browser/API preview | CSV, HDFC Delimited `.txt`, and PDF uploads | `POST /imports/preview` stages a bounded local upload, extracts candidates, and deletes raw uploaded bytes after extraction. |
 | Digital PDF | Yes, best-effort | Uses `pdfplumber` table/word extraction with source-page provenance. |
 | Scanned PDF | Basic local OCR fallback | Requires Tesseract installed on `PATH`; OCR-derived rows carry review warnings, and low-confidence date/amount fields block commit. |
 
 Upload limits default to 15 MiB, 100 PDF pages, 10,000 candidate rows, and a 24-hour TTL for uncommitted normalized batches. Committed batches keep metadata and transaction IDs, not raw statement bytes.
 
-CSV imports accept common aliases for date, description, amount, account, and transaction ID. They support signed `amount` columns, debit/credit columns, comma/semicolon/tab delimiters, UTF-8 BOM, row-level errors, duplicate detection, and manual review for unresolved classifications.
+CSV imports accept common aliases for date, description, amount, account, and transaction ID. They support signed `amount` columns, debit/credit columns, comma/semicolon/tab delimiters, UTF-8 BOM, row-level errors, duplicate detection, and manual review for unresolved classifications. HDFC India Delimited exports are content-detected from their exact seven-column header, require a confirmed INR Current/Savings account, and reconcile ordered closing balances before commit.
 
 For unsigned credit-card-style exports, the preview API supports an explicit `amount_sign` patch (`as_written` or `debit_positive`) so PFA does not silently guess whether positive values are purchases or credits.
 
