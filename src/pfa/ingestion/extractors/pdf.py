@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -20,7 +19,7 @@ from pdfplumber.page import Page
 from pdfplumber.pdf import PDF
 
 from pfa.config import get_settings
-from pfa.domain.money import Money
+from pfa.domain.money import minor_units
 from pfa.ingestion.candidates import (
     AMBIGUOUS_SIGN,
     ERROR,
@@ -36,7 +35,9 @@ from pfa.ingestion.candidates import (
     ExtractionResult,
     StatementSource,
     match_header_alias,
+    parse_date,
 )
+from pfa.ingestion.dialects import GENERIC, Dialect
 
 # ponytail: max_candidate_rows is T3's setting (src/pfa/config.py, landing in a parallel
 # branch). Mirrors the plan's stated default until that lands; swap for
@@ -44,7 +45,6 @@ from pfa.ingestion.candidates import (
 _DEFAULT_MAX_CANDIDATE_ROWS = 10_000
 
 _AMOUNT_FIELDS = ("amount", "debit", "credit")
-_DATE_PATTERNS = ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%m/%d/%Y")
 
 _LINE_TOLERANCE = 3.0  # points; words within this many points of `top` share a line
 _CELL_GAP = 10.0  # points; a horizontal gap larger than this starts a new cell/column
@@ -168,13 +168,69 @@ def _assign_cells(
     return fields, field_conf
 
 
-def _word_rows(words: list[Word], page_number: int) -> tuple[list[_RawRow], float | None]:
-    """Returns the page's data rows plus the header line's `top` (or None if no header).
+def _is_date_text(text: str, dialect: Dialect = GENERIC) -> bool:
+    cleaned = text.strip()
+    if not cleaned:
+        return False
+    try:
+        parse_date(cleaned, date_order=dialect.date_order)
+        return True
+    except Exception:
+        return False
 
-    The header-to-first-data-row gap is a reliable one-line baseline for the continuation
-    check below, even on a page with too few data rows to measure a gap between two of
-    them.
+
+def _is_amount_text(text: str) -> bool:
+    cleaned, _ = clean_amount_text(text)
+    if not cleaned:
+        return False
+    try:
+        Decimal(cleaned)
+        return True
+    except Exception:
+        return False
+
+
+def _is_lone_credit_marker(
+    cells: list[tuple[float, str, float | None]], dialect: Dialect
+) -> str | None:
+    """The marker text when a line is nothing but a credit marker (own-line `CR`), else None.
+
+    A statement that prints `CR` on its own line - visually attached to the amount above it
+    but structurally its own row - would otherwise either vanish (no date, no amount pair to
+    match) or become a spurious candidate with no date of its own. Folding it back onto the
+    previous row as an explicit marker is what lets `_resolve_amount` read it correctly.
     """
+    if len(cells) != 1:
+        return None
+    text = cells[0][1].strip().upper().rstrip(".")
+    for marker in dialect.credit_markers:
+        if text == marker.upper().rstrip("."):
+            return cells[0][1].strip()
+    return None
+
+
+def _cluster_words_into_columns(words: list[Word]) -> list[list[Word]]:
+    if not words:
+        return []
+    min_x = min(w["x0"] for w in words)
+    max_x = max(w["x1"] for w in words)
+    width = max_x - min_x
+    if width < 150:
+        return [words]
+    split_x = min_x + width * 0.55
+    left = [w for w in words if (w["x0"] + w["x1"]) / 2.0 < split_x]
+    right = [w for w in words if (w["x0"] + w["x1"]) / 2.0 >= split_x]
+    columns: list[list[Word]] = []
+    if left:
+        columns.append(left)
+    if right:
+        columns.append(right)
+    return columns or [words]
+
+
+def _process_lines_for_column(
+    words: list[Word], page_number: int, dialect: Dialect = GENERIC
+) -> tuple[list[_RawRow], float | None]:
     lines = _group_lines(words)
     columns: list[tuple[float, str]] | None = None
     header_top: float | None = None
@@ -182,11 +238,39 @@ def _word_rows(words: list[Word], page_number: int) -> tuple[list[_RawRow], floa
     position = 0
     for line in lines:
         cells = _split_cells(line)
+        marker_text = _is_lone_credit_marker(cells, dialect)
+        if marker_text is not None and rows:
+            rows[-1].fields.setdefault("type", marker_text)
+            rows[-1].raw_text = f"{rows[-1].raw_text} / {marker_text}"
+            continue
         if columns is None:
             columns = _header_columns(cells)
             if columns is not None:
                 header_top = line[0]["top"]
-            continue  # header line itself, or noise above it - never a data row
+                continue
+            if len(cells) >= 2:
+                first_text = cells[0][1]
+                last_text = cells[-1][1]
+                if _is_date_text(first_text, dialect) and _is_amount_text(last_text):
+                    position += 1
+                    description = " ".join(c[1] for c in cells[1:-1] if c[1] != first_text)
+                    fields = {
+                        "date": first_text,
+                        "description": description,
+                        "amount": last_text,
+                    }
+                    raw_text = " | ".join(text for _, text, _ in cells)
+                    rows.append(
+                        _RawRow(
+                            source_page=page_number,
+                            position=position,
+                            top=line[0]["top"],
+                            fields=fields,
+                            raw_text=raw_text,
+                            is_ocr=any("conf" in word for word in line),
+                        )
+                    )
+            continue
         position += 1
         fields, field_conf = _assign_cells(cells, columns)
         raw_text = " | ".join(text for _, text, _ in cells)
@@ -204,23 +288,41 @@ def _word_rows(words: list[Word], page_number: int) -> tuple[list[_RawRow], floa
     return rows, header_top
 
 
-def _has_parseable_date(fields: dict[str, str]) -> bool:
+def _word_rows(
+    words: list[Word], page_number: int, dialect: Dialect = GENERIC
+) -> tuple[list[_RawRow], float | None]:
+    """Returns the page's data rows plus the header line's `top` (or None if no header)."""
+    if dialect.two_column:
+        cols = _cluster_words_into_columns(words)
+        all_rows: list[_RawRow] = []
+        first_header: float | None = None
+        for col_words in cols:
+            rows, header_top = _process_lines_for_column(col_words, page_number, dialect)
+            if rows:
+                all_rows.extend(rows)
+                if first_header is None:
+                    first_header = header_top
+        return all_rows, first_header
+    return _process_lines_for_column(words, page_number, dialect)
+
+
+def _has_parseable_date(fields: dict[str, str], dialect: Dialect = GENERIC) -> bool:
     value = fields.get("date", "").strip()
-    for pattern in _DATE_PATTERNS:
-        try:
-            datetime.strptime(value, pattern)
-            return True
-        except ValueError:
-            continue
-    return False
+    if not value:
+        return False
+    try:
+        parse_date(value, date_order=dialect.date_order)
+        return True
+    except Exception:
+        return False
 
 
 def _has_parseable_amount(fields: dict[str, str]) -> bool:
     return any(_signed_minor(fields.get(field, "")) is not None for field in _AMOUNT_FIELDS)
 
 
-def _is_plausible_data_row(row: _RawRow) -> bool:
-    return _has_parseable_date(row.fields) and _has_parseable_amount(row.fields)
+def _is_plausible_data_row(row: _RawRow, dialect: Dialect = GENERIC) -> bool:
+    return _has_parseable_date(row.fields, dialect) and _has_parseable_amount(row.fields)
 
 
 def _has_filled_transaction_cell(row: _RawRow) -> bool:
@@ -230,12 +332,6 @@ def _has_filled_transaction_cell(row: _RawRow) -> bool:
 
 
 def _line_height(rows: list[_RawRow], header_top: float | None) -> float:
-    """The smallest line-to-line gap on the page - a good proxy for one text line.
-
-    Using the minimum (rather than e.g. the median) keeps a single large gap - the very
-    thing a continuation check needs to measure against - from inflating the baseline.
-    The header-to-first-row gap is included as a reliable one-line reference point.
-    """
     tops = [row.top for row in rows if row.top is not None]
     if header_top is not None:
         tops = [header_top, *tops]
@@ -243,9 +339,13 @@ def _line_height(rows: list[_RawRow], header_top: float | None) -> float:
     return min(diffs) if diffs else _DEFAULT_LINE_HEIGHT
 
 
-def _merge_continuations(rows: list[_RawRow], header_top: float | None) -> list[_RawRow]:
+def _merge_continuations(
+    rows: list[_RawRow], header_top: float | None, dialect: Dialect = GENERIC
+) -> list[_RawRow]:
     """Joins structurally empty wrapped description lines into the row above them."""
-    has_plausible_row = any(row.top is not None and _is_plausible_data_row(row) for row in rows)
+    has_plausible_row = any(
+        row.top is not None and _is_plausible_data_row(row, dialect) for row in rows
+    )
     threshold = _line_height(rows, header_top) * _CONTINUATION_FACTOR
     kept: list[_RawRow] = []
     last: _RawRow | None = None
@@ -253,7 +353,7 @@ def _merge_continuations(rows: list[_RawRow], header_top: float | None) -> list[
         has_description = bool(row.fields.get("description", "").strip())
         if (
             row.top is None
-            or _is_plausible_data_row(row)
+            or _is_plausible_data_row(row, dialect)
             or (_has_filled_transaction_cell(row) and (has_plausible_row or has_description))
         ):
             kept.append(row)
@@ -265,7 +365,7 @@ def _merge_continuations(rows: list[_RawRow], header_top: float | None) -> list[
                 existing = last.fields.get("description", "")
                 last.fields["description"] = f"{existing} {joined}".strip()
             last.raw_text = f"{last.raw_text} / {row.raw_text}"
-            last.top = row.top  # chain distance from the most recently joined line
+            last.top = row.top
     return kept
 
 
@@ -273,6 +373,7 @@ def _merge_continuations(rows: list[_RawRow], header_top: float | None) -> list[
 class _AmountResult:
     minor: int | None = None
     direction: str | None = None
+    direction_explicit: bool = False
     issue: CandidateIssue | None = None
 
 
@@ -289,13 +390,23 @@ def clean_amount_text(text: str) -> tuple[str, bool]:
     if cleaned.startswith("-") or cleaned.startswith(_UNICODE_MINUS):
         negative = True
         cleaned = cleaned[1:].strip()
-    for char in _CURRENCY_CHARS:
+    for char in _CURRENCY_CHARS + "₹\ufffd":
         cleaned = cleaned.replace(char, "")
     cleaned = cleaned.replace(",", "").replace(_UNICODE_MINUS, "").strip()
+    upper = cleaned.upper()
+    if upper.endswith("CR."):
+        cleaned = cleaned[:-3].strip()
+        negative = False
+    elif upper.endswith("CR"):
+        cleaned = cleaned[:-2].strip()
+        negative = False
+    elif upper.startswith("CR"):
+        cleaned = cleaned[2:].strip()
+        negative = False
     return cleaned, negative
 
 
-def _signed_minor(text: str) -> tuple[int, bool] | None:
+def _signed_minor(text: str, currency: str = "GBP") -> tuple[int, bool] | None:
     cleaned, negative = clean_amount_text(text)
     if not cleaned:
         return None
@@ -303,26 +414,29 @@ def _signed_minor(text: str) -> tuple[int, bool] | None:
         decimal = Decimal(cleaned)
     except InvalidOperation:
         return None
-    return Money.from_major(abs(decimal)).minor, negative
+    return minor_units(abs(decimal), currency), negative
 
 
-def _resolve_amount(fields: dict[str, str]) -> _AmountResult:
-    """Resolves one signed amount. Two disagreeing sign sources block, never guess.
-
-    Balance is intentionally never read here - it is provenance only, never a transaction
-    amount. ponytail: reconciling running balance against amount deltas (the spec allows
-    this to surface warnings only) is deferred - no test or issue code calls for it yet;
-    add a RECONCILIATION_MISMATCH warning code and compare deltas here if that's needed.
-    """
+def _resolve_amount(
+    fields: dict[str, str], dialect: Dialect = GENERIC, currency: str = "GBP"
+) -> _AmountResult:
     debit_text = fields.get("debit", "").strip()
     credit_text = fields.get("credit", "").strip()
     amount_text = fields.get("amount", "").strip()
 
+    is_explicit_cr = False
+    for marker in dialect.credit_markers:
+        if marker in amount_text.upper() or fields.get("type", "").upper() == marker:
+            is_explicit_cr = True
+            break
+
     if amount_text:
-        parsed = _signed_minor(amount_text)
+        parsed = _signed_minor(amount_text, currency)
         if parsed is None:
             return _AmountResult()
         minor, negative = parsed
+        if is_explicit_cr:
+            return _AmountResult(minor=minor, direction="credit", direction_explicit=True)
         return _AmountResult(minor=minor, direction="debit" if negative else "credit")
 
     if debit_text and credit_text:
@@ -335,7 +449,7 @@ def _resolve_amount(fields: dict[str, str]) -> _AmountResult:
 
     if debit_text or credit_text:
         implied_direction = "debit" if debit_text else "credit"
-        parsed = _signed_minor(debit_text or credit_text)
+        parsed = _signed_minor(debit_text or credit_text, currency)
         if parsed is None:
             return _AmountResult()
         minor, negative = parsed
@@ -346,12 +460,18 @@ def _resolve_amount(fields: dict[str, str]) -> _AmountResult:
                     "credit column holds a negative/parenthesised value; sign cannot be determined",
                 )
             )
-        return _AmountResult(minor=minor, direction=implied_direction)
+        return _AmountResult(minor=minor, direction=implied_direction, direction_explicit=True)
 
     return _AmountResult()
 
 
-def _build_candidate(index: int, row: _RawRow, ocr_min_confidence: float) -> CandidateTransaction:
+def _build_candidate(
+    index: int,
+    row: _RawRow,
+    ocr_min_confidence: float,
+    currency: str = "GBP",
+    dialect: Dialect = GENERIC,
+) -> CandidateTransaction:
     fields = row.fields
     raw_fields = {name: value for name, value in fields.items() if value.strip()}
     raw_fields["raw_text"] = row.raw_text
@@ -359,7 +479,7 @@ def _build_candidate(index: int, row: _RawRow, ocr_min_confidence: float) -> Can
         candidate_id=f"p{index}",
         transaction_date=fields.get("date", "").strip() or None,
         raw_description=fields.get("description", "").strip(),
-        currency="GBP",
+        currency=currency.upper(),
         external_id=fields.get("reference", "").strip() or None,
         source_format="pdf",
         source_page=row.source_page,
@@ -367,12 +487,13 @@ def _build_candidate(index: int, row: _RawRow, ocr_min_confidence: float) -> Can
         extraction_method="ocr" if row.is_ocr else "pdf",
         raw_fields=raw_fields,
     )
-    amount = _resolve_amount(fields)
+    amount = _resolve_amount(fields, dialect, currency)
     if amount.issue:
         candidate.issues.append(amount.issue)
     else:
         candidate.amount_minor = amount.minor
         candidate.direction = amount.direction
+        candidate.direction_explicit = amount.direction_explicit
     if row.is_ocr:
         candidate.add_issue(
             OCR_EXTRACTED,
@@ -406,6 +527,8 @@ class PdfStatementExtractor:
         max_candidate_rows: int | None = None,
         word_provider: WordProvider | None = None,
         ocr_min_confidence: float | None = None,
+        dialect: Dialect = GENERIC,
+        currency: str = "GBP",
     ) -> None:
         self._max_pages = (
             max_pdf_pages if max_pdf_pages is not None else get_settings().max_pdf_pages
@@ -419,6 +542,8 @@ class PdfStatementExtractor:
             if ocr_min_confidence is not None
             else get_settings().ocr_min_confidence
         )
+        self.dialect = dialect
+        self.currency = currency
 
     def extract(self, source: StatementSource) -> ExtractionResult:
         result = ExtractionResult(extractor=self.name)
@@ -433,7 +558,7 @@ class PdfStatementExtractor:
                 )
             )
             return result
-        except Exception:  # a corrupt/unsupported PDF becomes a sanitized batch issue
+        except Exception:
             result.issues.append(
                 CandidateIssue(
                     PDF_NOT_EXTRACTABLE,
@@ -456,10 +581,10 @@ class PdfStatementExtractor:
         kept: list[_RawRow] = []
         for page in pdf.pages:
             page_rows, header_top = self._page_rows(page)
-            kept.extend(_merge_continuations(page_rows, header_top))
+            kept.extend(_merge_continuations(page_rows, header_top, self.dialect))
 
         candidates = [
-            _build_candidate(index, row, self._ocr_min_confidence)
+            _build_candidate(index, row, self._ocr_min_confidence, self.currency, self.dialect)
             for index, row in enumerate(kept, start=1)
         ]
         if len(candidates) > self._max_rows:
@@ -488,4 +613,4 @@ class PdfStatementExtractor:
             mapping = _table_header(table)
             if mapping:
                 return _table_rows(table, mapping, page.page_number), None
-        return _word_rows(self._word_provider(page), page.page_number)
+        return _word_rows(self._word_provider(page), page.page_number, self.dialect)

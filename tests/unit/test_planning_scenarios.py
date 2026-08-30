@@ -6,9 +6,10 @@ from pfa.planning.service import PlanningService
 
 
 class StableHistory:
-    def monthly_summary(self, period: date) -> MonthlySummary:
+    def monthly_summary(self, period: date, currency: str = "GBP") -> MonthlySummary:
         return MonthlySummary(
             period=period.strftime("%Y-%m"),
+            currency=currency,
             income_minor=400_000,
             spending_minor=300_000,
             net_cashflow_minor=100_000,

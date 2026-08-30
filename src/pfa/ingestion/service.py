@@ -9,6 +9,7 @@ from typing import Protocol
 from pfa.db.models import MerchantRuleModel, TransactionModel
 from pfa.db.unit_of_work import UnitOfWork
 from pfa.domain.errors import ImportRowError
+from pfa.domain.money import SUPPORTED_CURRENCIES
 from pfa.domain.transactions import (
     ClassificationSource,
     SpendingCategory,
@@ -18,6 +19,7 @@ from pfa.domain.transactions import (
 from pfa.observability import TimedOperation
 
 from .candidates import (
+    CURRENCY_ACCOUNT_MISMATCH,
     DUPLICATE_ROW,
     ERROR,
     INVALID_AMOUNT,
@@ -102,27 +104,34 @@ def _classification_from_rule(rule: MerchantRuleModel) -> Classification:
 
 
 def _validate_candidate(candidate: CandidateTransaction) -> None:
+    if not candidate.transaction_date:
+        candidate.add_issue(INVALID_DATE, "missing transaction date")
+        return
     try:
-        parse_date(candidate.transaction_date or "")
+        parse_date(candidate.transaction_date)
     except ImportRowError as exc:
         candidate.add_issue(INVALID_DATE, str(exc))
         return
-    if not candidate.raw_description:
+    if not candidate.raw_description.strip():
         candidate.add_issue(MISSING_DESCRIPTION, "missing description")
         return
     if candidate.amount_minor is None:
         try:
-            sign, amount_minor = parse_amount(candidate.raw_fields.get("amount", ""))
+            sign, amount_minor, is_explicit_credit = parse_amount(
+                candidate.raw_fields.get("amount", ""), candidate.currency
+            )
         except ImportRowError as exc:
             candidate.add_issue(INVALID_AMOUNT, str(exc))
             return
         candidate.amount_minor = amount_minor
         candidate.direction = "debit" if sign < 0 else "credit"
+        candidate.direction_explicit = is_explicit_credit
     candidate.normalized_description = normalize_description(candidate.raw_description)
-    if candidate.currency != "GBP":
+    if candidate.currency.upper() not in SUPPORTED_CURRENCIES:
+        supported = ", ".join(sorted(SUPPORTED_CURRENCIES))
         candidate.add_issue(
             UNSUPPORTED_CURRENCY,
-            f"unsupported currency {candidate.currency!r}; PFA v0.1 supports GBP only",
+            f"unsupported currency {candidate.currency!r}; supported: {supported}",
         )
         return
     if candidate.posted_date:
@@ -154,6 +163,17 @@ class ImportService:
         for candidate in candidates:
             if candidate.state != ERROR:
                 _validate_candidate(candidate)
+            if candidate.state != ERROR and candidate.account_hint:
+                # Only an *existing* account can disagree with the row - a brand-new
+                # account takes its currency from the first candidate that names it, at
+                # commit time, so there is nothing to compare against yet.
+                account = self.uow.accounts.get_by_name(candidate.account_hint)
+                if account is not None and account.currency.upper() != candidate.currency.upper():
+                    candidate.add_issue(
+                        CURRENCY_ACCOUNT_MISMATCH,
+                        f"row currency {candidate.currency} does not match "
+                        f"{account.name}'s account currency {account.currency}",
+                    )
 
     def resolve_duplicates(self, candidates: Sequence[CandidateTransaction]) -> None:
         """Fingerprints valid rows, occurrence-aware, and matches them against the ledger."""
@@ -207,6 +227,16 @@ class ImportService:
             account = self.uow.accounts.get_or_create(
                 candidate.account_hint or "Main account", candidate.currency
             )
+            if account.currency.upper() != candidate.currency.upper():
+                # validate() already blocks this for an existing account at preview time;
+                # reaching it here means a caller committed without validating first. Skip
+                # rather than raise - a currency mismatch must never crash a commit.
+                candidate.add_issue(
+                    CURRENCY_ACCOUNT_MISMATCH,
+                    f"row currency {candidate.currency} does not match "
+                    f"{account.name}'s account currency {account.currency}",
+                )
+                continue
             transaction = TransactionModel(
                 external_id=candidate.external_id,
                 account_id=account.id,

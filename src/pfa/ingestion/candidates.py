@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Protocol
 
 from pfa.domain.errors import ImportRowError
-from pfa.domain.money import Money
+from pfa.domain.money import minor_units
 
 ERROR = "error"
 WARNING = "warning"
@@ -28,6 +28,8 @@ MISSING_DESCRIPTION = "MISSING_DESCRIPTION"
 INVALID_AMOUNT = "INVALID_AMOUNT"
 AMBIGUOUS_SIGN = "AMBIGUOUS_SIGN"
 UNSUPPORTED_CURRENCY = "UNSUPPORTED_CURRENCY"
+CURRENCY_ACCOUNT_MISMATCH = "CURRENCY_ACCOUNT_MISMATCH"
+STATEMENT_YEAR_INFERRED = "STATEMENT_YEAR_INFERRED"
 UNKNOWN_KIND = "UNKNOWN_KIND"
 UNKNOWN_CATEGORY = "UNKNOWN_CATEGORY"
 UNKNOWN_TRANSFER_PURPOSE = "UNKNOWN_TRANSFER_PURPOSE"
@@ -83,22 +85,110 @@ def match_header_alias(cell_text: str) -> str | None:
     return None
 
 
-def parse_date(value: str) -> date:
-    for pattern in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%m/%d/%Y"):
+_YEARLESS_DATE_PATTERNS: tuple[str, ...] = ("%b%d", "%b %d", "%d %b")
+
+
+def _year_bearing_date_patterns(date_order: str) -> tuple[str, ...]:
+    if date_order == "month_first":
+        return (
+            "%Y-%m-%d",
+            "%m/%d/%Y",
+            "%m-%d-%Y",
+            "%d/%m/%Y",
+            "%d-%m-%Y",
+            "%b %d %Y",
+            "%b %d, %Y",
+            "%d %b %Y",
+            "%d %b %y",
+            "%d/%m/%y",
+            "%m/%d/%y",
+        )
+    return (
+        "%Y-%m-%d",
+        "%d/%m/%Y",
+        "%d-%m-%Y",
+        "%d %b %Y",
+        "%d %b %y",
+        "%b %d %Y",
+        "%b %d, %Y",
+        "%d/%m/%y",
+        "%m/%d/%Y",
+        "%m-%d-%Y",
+    )
+
+
+def is_year_bearing_date(value: str, date_order: str = "day_first") -> bool:
+    """True when `value` carries its own year, rather than needing one assumed for it."""
+    cleaned = value.strip()
+    for pattern in _year_bearing_date_patterns(date_order):
         try:
-            return datetime.strptime(value, pattern).date()
+            datetime.strptime(cleaned, pattern)
+            return True
         except ValueError:
             continue
+    return False
+
+
+def parse_date(
+    value: str,
+    date_order: str = "day_first",
+    statement_year: int | None = None,
+) -> date:
+    cleaned = value.strip()
+    for pattern in _year_bearing_date_patterns(date_order):
+        try:
+            return datetime.strptime(cleaned, pattern).date()
+        except ValueError:
+            continue
+
+    # Year-less format attempts like 'Jul31', 'Jul 31', '21 Jul'. `statement_year` should
+    # always come from other year-bearing dates in the same statement (see
+    # ingestion.batches._normalize_dates) - falling back to today's year here is a last
+    # resort for a caller that never supplied one.
+    year = statement_year or date.today().year
+    for pattern in _YEARLESS_DATE_PATTERNS:
+        try:
+            dt = datetime.strptime(cleaned, pattern)
+            return dt.replace(year=year).date()
+        except ValueError:
+            continue
+
     raise ImportRowError(f"invalid date {value!r}")
 
 
-def parse_amount(value: str) -> tuple[int, int]:
+def parse_amount(value: str, currency: str = "GBP") -> tuple[int, int, bool]:
+    """Parses a signed amount. Returns (sign, minor_units, was_an_explicit_credit_marker).
+
+    The third element tells the caller the row's direction came from a CR/CREDIT marker in
+    the text itself, not from the statement's general sign convention - so a later
+    convention choice (e.g. "debit positive") must never override it.
+    """
+    cleaned = (
+        value.replace(",", "")
+        .replace("£", "")
+        .replace("$", "")
+        .replace("€", "")
+        .replace("₹", "")
+        .replace("�", "")
+        .strip()
+    )
+    is_cr = False
+    upper = cleaned.upper()
+    if upper.endswith("CR."):
+        cleaned = cleaned[:-3].strip()
+        is_cr = True
+    elif upper.endswith("CR"):
+        cleaned = cleaned[:-2].strip()
+        is_cr = True
+    elif upper.startswith("CR"):
+        cleaned = cleaned[2:].strip()
+        is_cr = True
     try:
-        decimal = Decimal(value.replace(",", "").replace("£", "").strip())
+        decimal = Decimal(cleaned)
     except InvalidOperation as exc:
         raise ImportRowError(f"invalid amount {value!r}") from exc
-    sign = -1 if decimal < 0 else 1
-    return sign, Money.from_major(abs(decimal)).minor
+    sign = 1 if is_cr else (-1 if decimal < 0 else 1)
+    return sign, minor_units(abs(decimal), currency), is_cr
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +218,10 @@ class CandidateTransaction:
     normalized_description: str = ""
     amount_minor: int | None = None  # absolute magnitude, matches TransactionModel
     direction: str | None = None  # "debit" | "credit"
+    # True once `direction` was read from an explicit marker (a CR/CREDIT suffix, or a
+    # debit/credit column) rather than the statement's general sign convention. A later
+    # amount-sign convention choice must never overwrite a row already resolved this way.
+    direction_explicit: bool = False
     currency: str = "GBP"
     account_hint: str | None = None
     external_id: str | None = None
