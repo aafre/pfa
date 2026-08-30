@@ -47,6 +47,7 @@ from .candidates import (
     RECONCILIATION_MISMATCH,
     STATEMENT_YEAR_INFERRED,
     TOO_MANY_ROWS,
+    UNDO_REQUIRES_CONFIRMATION,
     VALID,
     WARNING,
     CandidateIssue,
@@ -800,6 +801,41 @@ def commit_batch(uow: UnitOfWork, batch_id: str, settings: Settings) -> ImportBa
     counts = _counts(candidates)
     counts["imported"] = len(committed)
     batch.counts_json = json.dumps(counts)
+    batch.updated_at = _now()
+    return uow.import_batches.add(batch)
+
+
+def undo_batch(
+    uow: UnitOfWork, batch_id: str, *, confirm_changed: bool = False
+) -> ImportBatchModel:
+    batch = load_batch(uow, batch_id)
+    if batch.status == "undone":
+        return batch
+    if batch.status != "committed":
+        raise BatchError(
+            BATCH_NOT_EDITABLE,
+            f"batch is {batch.status}; only committed imports can be undone",
+            409,
+        )
+    ids = set(batch_committed_transaction_ids(batch))
+    rows = uow.transactions.by_ids(list(ids))
+    changed = sum(
+        1
+        for row in rows
+        if batch.committed_at is not None
+        and row.updated_at is not None
+        and row.updated_at > batch.committed_at
+    )
+    if changed and not confirm_changed:
+        raise BatchError(
+            UNDO_REQUIRES_CONFIRMATION,
+            f"{changed} imported row(s) were edited after import; confirm undo to remove them",
+            409,
+        )
+    uow.transfers.delete_for_transactions(ids)
+    for row in rows:
+        uow.session.delete(row)
+    batch.status = "undone"
     batch.updated_at = _now()
     return uow.import_batches.add(batch)
 

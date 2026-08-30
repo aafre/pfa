@@ -126,10 +126,10 @@ def _csv_detection(path: Path) -> AdapterDetection:
         header = []
     headers = {" ".join(cell.strip().lower().split()) for cell in header}
     if (
-        "american express" in lower
-        or "card member" in lower
+        "card member" in lower
         or "membership number" in lower
         or "payment received - thank you" in lower
+        or ("american express" in lower and "card" in lower)
     ):
         return AdapterDetection(
             AMEX_UK_CSV,
@@ -155,7 +155,11 @@ def _pdf_detection(path: Path) -> AdapterDetection:
     except Exception:
         return AdapterDetection(GENERIC, 0.0, ("unreadable_content",))
     lower = text.lower()
-    if "american express" in lower or "payment received - thank you" in lower:
+    if (
+        "card member" in lower
+        or "membership number" in lower
+        or ("american express" in lower and "card" in lower)
+    ):
         return AdapterDetection(
             AMEX_UK_PDF,
             0.98,

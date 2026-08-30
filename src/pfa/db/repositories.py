@@ -247,11 +247,23 @@ class TransferRepository:
         event_ids = {leg.event_id for leg in legs}
         for leg in legs:
             self.session.delete(leg)
+        self.session.flush()
         for event_id in event_ids:
             remaining = self.session.scalar(
                 select(TransferLegModel.id).where(TransferLegModel.event_id == event_id).limit(1)
             )
             if remaining is None:
+                event = self.session.get(TransferEventModel, event_id)
+                if event is not None:
+                    self.session.delete(event)
+            elif (
+                len(
+                    self.session.scalars(
+                        select(TransferLegModel).where(TransferLegModel.event_id == event_id)
+                    ).all()
+                )
+                < 2
+            ):
                 event = self.session.get(TransferEventModel, event_id)
                 if event is not None:
                     self.session.delete(event)

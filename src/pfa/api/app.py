@@ -38,6 +38,7 @@ from pfa.ingestion.batches import (
     discard_batch,
     load_batch,
     sweep_expired_batches,
+    undo_batch,
 )
 from pfa.ingestion.candidates import FILE_TOO_LARGE, CandidateIssue, CandidateTransaction
 from pfa.ingestion.service import ImportService
@@ -171,6 +172,10 @@ class ImportBatchPatchRequest(BaseModel):
     # Both are closed sets: an unrecognised value is a 422, not a silent no-op.
     amount_mode: Literal["debit", "credit"] | None = None
     amount_sign: Literal["as_written", "debit_positive"] | None = None
+
+
+class UndoImportRequest(BaseModel):
+    confirm_changed: bool = False
 
 
 class ScenarioRequest(BaseModel):
@@ -453,6 +458,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         engine, services = open_services(active_settings)
         try:
             batch = commit_batch(services.uow, batch_id, active_settings)
+            response = _batch_response(batch)
+            close_services(engine, services)
+            return response
+        except BatchError as exc:
+            close_services(engine, services, False)
+            raise HTTPException(
+                status_code=exc.status_code, detail={"code": exc.code, "message": exc.message}
+            ) from exc
+        except Exception:
+            close_services(engine, services, False)
+            raise
+
+    @app.post("/imports/{batch_id}/undo", response_model=ImportBatchResponse)
+    def undo_import_batch(
+        batch_id: str, request: UndoImportRequest | None = None
+    ) -> ImportBatchResponse:
+        engine, services = open_services(active_settings)
+        try:
+            batch = undo_batch(
+                services.uow,
+                batch_id,
+                confirm_changed=request.confirm_changed if request else False,
+            )
             response = _batch_response(batch)
             close_services(engine, services)
             return response
