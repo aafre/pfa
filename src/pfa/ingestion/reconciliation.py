@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from pfa.domain.accounts import AccountType, account_nature
+from pfa.domain.errors import ImportRowError
 from pfa.domain.money import minor_units
 
-from .candidates import CandidateTransaction
+from .candidates import CandidateTransaction, parse_date
 from .extractors.pdf import clean_amount_text
 
 
@@ -57,8 +58,8 @@ def _hdfc_reconciliation(candidates: list[CandidateTransaction]) -> dict[str, An
 
     first, first_closing = rows[0]
     try:
-        first_date = date.fromisoformat(first.transaction_date or "")
-    except ValueError:
+        first_date = parse_date(first.transaction_date or "", "day_first")
+    except (ImportRowError, ValueError):
         first_date = None
     first_signed = first.signed_amount_minor
     assert first_signed is not None

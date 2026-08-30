@@ -8,6 +8,7 @@ not allowed to fall through to positional parsing.
 from __future__ import annotations
 
 import csv
+import io
 import re
 from collections.abc import Iterable
 from decimal import Decimal, InvalidOperation
@@ -138,7 +139,7 @@ class HdfcDelimitedExtractor:
             result.issues.append(CandidateIssue(UNREADABLE_FILE, "could not read the statement"))
             return result
 
-        reader = csv.reader(text.splitlines())
+        reader = csv.reader(io.StringIO(text))
         header: list[str] | None = None
         try:
             for row in reader:
@@ -172,9 +173,7 @@ class HdfcDelimitedExtractor:
                         source_format="csv",
                         source_line=line_number,
                         extraction_method=self.name,
-                        raw_fields={
-                            "source_reference": row[5].strip() if len(row) > 5 else ""
-                        },
+                        raw_fields={"source_reference": row[5].strip() if len(row) > 5 else ""},
                     )
                     candidate.add_issue(
                         HDFC_ROW_WIDTH_INVALID,
