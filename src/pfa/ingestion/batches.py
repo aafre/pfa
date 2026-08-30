@@ -28,10 +28,13 @@ from pfa.ingestion.service import ImportService
 from .candidates import (
     ACCOUNT_CURRENCY_MISMATCH,
     ACCOUNT_INACTIVE,
+    ACCOUNT_INSTITUTION_MISMATCH,
+    ACCOUNT_INSTITUTION_REQUIRED,
     ACCOUNT_NOT_FOUND,
     ACCOUNT_REQUIRED,
     ACCOUNT_TYPE_MISMATCH,
     AMBIGUOUS_SIGN,
+    BALANCE_RECONCILIATION_FAILED,
     BATCH_ALREADY_COMMITTED,
     BATCH_EXPIRED,
     BATCH_HAS_BLOCKING_ERRORS,
@@ -43,6 +46,7 @@ from .candidates import (
     EXTRACTION_TIMEOUT,
     GENERIC_SIGN_CONFIRMATION_REQUIRED,
     INVALID_ACCOUNT_DRAFT,
+    INVALID_ACCOUNT_METADATA_UPDATE,
     NO_USABLE_ROWS,
     RECONCILIATION_INCOMPLETE,
     RECONCILIATION_MISMATCH,
@@ -87,6 +91,7 @@ class NewAccountDraft:
     last4: str | None = None
     opening_balance_minor: int = 0
     opening_balance_as_of: date | None = None
+    opening_balance_confirmed: bool = False
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -99,6 +104,7 @@ class NewAccountDraft:
             "opening_balance_as_of": self.opening_balance_as_of.isoformat()
             if self.opening_balance_as_of
             else None,
+            "opening_balance_confirmed": self.opening_balance_confirmed,
         }
 
     @classmethod
@@ -113,6 +119,7 @@ class NewAccountDraft:
             last4=str(value["last4"]) if value.get("last4") else None,
             opening_balance_minor=int(str(opening)),
             opening_balance_as_of=date.fromisoformat(str(as_of)) if as_of else None,
+            opening_balance_confirmed=bool(value.get("opening_balance_confirmed", False)),
         )
 
 
@@ -124,6 +131,7 @@ class BatchPatch:
     excluded_candidate_ids: list[str] | None = None
     amount_mode: str | None = None
     amount_sign: str | None = None
+    account_metadata_update: dict[str, str] | None = None
 
 
 def _now() -> datetime:
@@ -166,11 +174,18 @@ def batch_semantic_totals(batch: ImportBatchModel) -> dict[str, int]:
         saved = json.loads(batch.reconciliation_json).get("semantic_totals")
         if isinstance(saved, dict):
             return {str(key): int(value) for key, value in saved.items()}
-    spending = refunds = transfers = repayments = money_in = 0
+    spending = refunds = transfers = repayments = money_in = money_out = 0
+    money_in_count = money_out_count = 0
     for candidate in batch_candidates(batch):
         signed = candidate.signed_amount_minor
         if signed is None or not candidate.included:
             continue
+        if signed > 0:
+            money_in += signed
+            money_in_count += 1
+        elif signed < 0:
+            money_out += abs(signed)
+            money_out_count += 1
         description = candidate.raw_description.upper()
         kind = candidate.kind
         if kind is None:
@@ -193,10 +208,11 @@ def batch_semantic_totals(batch: ImportBatchModel) -> dict[str, int]:
                 "PAYMENT RECEIVED" in description and signed > 0
             ):
                 repayments += abs(signed)
-        elif kind == "income":
-            money_in += max(signed, 0)
     return {
         "money_in_minor": money_in,
+        "money_out_minor": money_out,
+        "money_in_count": money_in_count,
+        "money_out_count": money_out_count,
         "spending_minor": spending,
         "refunds_minor": refunds,
         "transfers_minor": transfers,
@@ -308,8 +324,12 @@ _BINDING_CODES = {
     ACCOUNT_NOT_FOUND,
     ACCOUNT_REQUIRED,
     ACCOUNT_TYPE_MISMATCH,
+    ACCOUNT_INSTITUTION_MISMATCH,
+    ACCOUNT_INSTITUTION_REQUIRED,
+    BALANCE_RECONCILIATION_FAILED,
     DUPLICATE_ACCOUNT_SUSPECTED,
     INVALID_ACCOUNT_DRAFT,
+    INVALID_ACCOUNT_METADATA_UPDATE,
     GENERIC_SIGN_CONFIRMATION_REQUIRED,
     RECONCILIATION_INCOMPLETE,
     RECONCILIATION_MISMATCH,
@@ -324,6 +344,20 @@ def _draft_from_batch(batch: ImportBatchModel) -> NewAccountDraft | None:
         return NewAccountDraft.from_dict(value)
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
+
+
+def _institution_key(value: str | None) -> str:
+    return (value or "").strip().casefold().replace(" ", "_")
+
+
+def _hdfc_opening_suggestion(batch: ImportBatchModel) -> dict[str, object] | None:
+    if not batch.reconciliation_json:
+        return None
+    try:
+        value = json.loads(batch.reconciliation_json).get("opening_balance_suggestion")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
 
 
 def _binding_issues(
@@ -361,6 +395,23 @@ def _binding_issues(
             }:
                 issues.append(
                     CandidateIssue(INVALID_ACCOUNT_DRAFT, "account name and currency are invalid")
+                )
+            expected_currency = dialect.suggested_currency
+            if expected_currency and draft.currency.upper() != expected_currency:
+                issues.append(
+                    CandidateIssue(
+                        ACCOUNT_CURRENCY_MISMATCH,
+                        f"this statement suggests {expected_currency}; confirm that currency",
+                    )
+                )
+            if dialect.institution and _institution_key(draft.institution) != _institution_key(
+                dialect.institution
+            ):
+                issues.append(
+                    CandidateIssue(
+                        ACCOUNT_INSTITUTION_MISMATCH,
+                        "this statement must be bound to HDFC Bank",
+                    )
                 )
             if draft.last4 is not None and (len(draft.last4) != 4 or not draft.last4.isdigit()):
                 issues.append(
@@ -423,15 +474,47 @@ def _binding_issues(
                     f"this statement is for {expected}; selected account is {account.account_type}",
                 )
             )
-        detected_currency = (batch.detected_currency or "GBP").upper()
-        if account.currency.upper() != detected_currency:
+        expected_currency = (dialect.suggested_currency or batch.detected_currency or "GBP").upper()
+        if account.currency.upper() != expected_currency:
             issues.append(
                 CandidateIssue(
                     ACCOUNT_CURRENCY_MISMATCH,
-                    f"statement currency {detected_currency} does not match "
+                    f"statement currency {expected_currency} does not match "
                     f"account currency {account.currency}",
                 )
             )
+        if dialect.institution:
+            if not account.institution:
+                issues.append(
+                    CandidateIssue(
+                        ACCOUNT_INSTITUTION_REQUIRED,
+                        "confirm that this legacy account is HDFC Bank before importing",
+                    )
+                )
+            elif _institution_key(account.institution) != _institution_key(dialect.institution):
+                issues.append(
+                    CandidateIssue(
+                        ACCOUNT_INSTITUTION_MISMATCH,
+                        "the selected account belongs to a different institution",
+                    )
+                )
+    if dialect.adapter_id == "hdfc_in_delimited_v1" and draft is not None:
+        suggestion = _hdfc_opening_suggestion(batch)
+        if suggestion is not None:
+            expected_date = suggestion.get("as_of")
+            expected_minor = suggestion.get("balance_minor")
+            if (
+                not draft.opening_balance_confirmed
+                or draft.opening_balance_as_of is None
+                or draft.opening_balance_as_of.isoformat() != expected_date
+                or draft.opening_balance_minor != expected_minor
+            ):
+                issues.append(
+                    CandidateIssue(
+                        INVALID_ACCOUNT_DRAFT,
+                        "confirm the derived opening balance and date before creating this account",
+                    )
+                )
     if (
         batch.adapter_id == "generic"
         and batch.amount_sign is None
@@ -477,12 +560,21 @@ def _set_reconciliation(
     result = reconcile_candidates(candidates, _reconciliation_account_type(batch, uow))
     batch.reconciliation_json = json.dumps(result)
     if batch.adapter_id not in (None, "generic"):
-        if result["status"] == "mismatch":
-            return [CandidateIssue(RECONCILIATION_MISMATCH, "statement balances do not reconcile")]
-        if result["status"] == "incomplete":
-            return [
+        issues: list[CandidateIssue] = []
+        if result["arithmetic_integrity"] == "mismatch":
+            issues.append(
+                CandidateIssue(
+                    BALANCE_RECONCILIATION_FAILED
+                    if batch.adapter_id == "hdfc_in_delimited_v1"
+                    else RECONCILIATION_MISMATCH,
+                    "statement balances do not reconcile",
+                )
+            )
+        if result["coverage_integrity"] == "incomplete":
+            issues.append(
                 CandidateIssue(RECONCILIATION_INCOMPLETE, "not every statement row is included")
-            ]
+            )
+        return issues
     return []
 
 
@@ -542,6 +634,11 @@ def create_batch(
         detection_reason_codes_json=json.dumps(list(detection.reason_codes)),
         detected_institution=detection.institution,
         detected_account_hint=detection.account_hint,
+        suggested_currency=detection.suggested_currency or dialect.suggested_currency,
+        currency_evidence=detection.currency_evidence or dialect.currency_evidence,
+        compatible_account_types_json=json.dumps(
+            sorted(item.value for item in dialect.compatible_account_types)
+        ),
         amount_sign=dialect.default_sign,
         issues_json="[]",
         counts_json=json.dumps(_counts([])),
@@ -619,6 +716,8 @@ def create_batch(
     )
     batch.detected_institution = extraction.detected_institution or detection.institution
     batch.detected_account_hint = extraction.detected_account_hint or detection.account_hint
+    batch.suggested_currency = detection.suggested_currency or dialect.suggested_currency
+    batch.currency_evidence = detection.currency_evidence or dialect.currency_evidence
     batch.page_count = extraction.page_count
     batch.candidates_json = candidates_to_json(candidates)
     _set_batch_issues(batch, uow, dialect, extraction.issues)
@@ -712,6 +811,30 @@ def apply_patch(uow: UnitOfWork, batch_id: str, patch: BatchPatch) -> ImportBatc
             "recognized statement formats determine amount signs automatically",
             422,
         )
+
+    if patch.account_metadata_update is not None:
+        update = patch.account_metadata_update
+        if (
+            patch.destination_account_id is None
+            or batch.adapter_id != "hdfc_in_delimited_v1"
+            or set(update) != {"institution"}
+            or _institution_key(update.get("institution")) != "hdfc_bank"
+        ):
+            raise BatchError(
+                INVALID_ACCOUNT_METADATA_UPDATE,
+                "only a missing legacy institution may be marked as HDFC Bank",
+                422,
+            )
+        metadata_account = uow.accounts.get(patch.destination_account_id)
+        if metadata_account is None:
+            raise BatchError(ACCOUNT_NOT_FOUND, "select an existing account", 422)
+        if metadata_account.institution is not None:
+            raise BatchError(
+                INVALID_ACCOUNT_METADATA_UPDATE,
+                "institution correction is allowed only when the account institution is missing",
+                422,
+            )
+        metadata_account.institution = "hdfc_bank"
 
     candidates = batch_candidates(batch)
 

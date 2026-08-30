@@ -623,7 +623,8 @@ class PdfStatementExtractor:
             result.issues.append(
                 CandidateIssue(
                     PDF_ENCRYPTED,
-                    "PDF is password-protected; remove the password and re-upload",
+                    "password-protected PDF import is not supported in this release; "
+                    "remove the password and re-upload",
                 )
             )
             return result

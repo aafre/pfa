@@ -20,13 +20,17 @@ from .candidates import (
     FILE_TOO_LARGE,
     INVALID_SIGNATURE,
     UNSUPPORTED_FILE_TYPE,
+    UNSUPPORTED_SPREADSHEET_FORMAT,
+    UNSUPPORTED_TEXT_FORMAT,
+    UNSUPPORTED_TEXT_LAYOUT,
     UPLOAD_FAILED,
     StatementSource,
 )
+from .dialects import HDFC_IN_DELIMITED, detect_adapter
 
 CHUNK_SIZE = 64 * 1024
-SUPPORTED_EXTENSIONS = {".csv", ".pdf"}
-DEFAULT_MEDIA_TYPES = {".csv": "text/csv", ".pdf": "application/pdf"}
+SUPPORTED_EXTENSIONS = {".csv", ".pdf", ".txt"}
+DEFAULT_MEDIA_TYPES = {".csv": "text/csv", ".pdf": "application/pdf", ".txt": "text/plain"}
 PDF_SIGNATURE = b"%PDF-"
 REJECTED_MEDIA_PREFIXES = ("image/",)
 
@@ -46,10 +50,15 @@ def stage_upload(
 
     original_filename = Path(file.filename or "upload").name
     ext = Path(original_filename).suffix.lower()
+    if ext in {".xls", ".xlsx"}:
+        raise UploadRejected(
+            UNSUPPORTED_SPREADSHEET_FORMAT,
+            "Excel statements are not supported; for HDFC, download the Delimited format",
+        )
     if ext not in SUPPORTED_EXTENSIONS:
         raise UploadRejected(
             UNSUPPORTED_FILE_TYPE,
-            f"unsupported file type {ext or '(none)'!r}; only .csv and .pdf are accepted",
+            f"unsupported file type {ext or '(none)'!r}; only .csv, .txt, and .pdf are accepted",
         )
     media_type = file.content_type or ""
     # Lowercased: a blocklist that "Image/PNG" walks straight through is not a blocklist.
@@ -93,7 +102,32 @@ def stage_upload(
             head.decode("utf-8-sig")
         except UnicodeDecodeError as exc:
             staged_path.unlink(missing_ok=True)
-            raise UploadRejected(INVALID_SIGNATURE, "file is not valid UTF-8 CSV text") from exc
+            raise UploadRejected(
+                INVALID_SIGNATURE,
+                "file is not valid UTF-8 delimited text",
+            ) from exc
+        if ext == ".txt":
+            detection = detect_adapter(staged_path, media_type)
+            if detection.dialect is not HDFC_IN_DELIMITED:
+                text = staged_path.read_text(encoding="utf-8-sig", errors="ignore")[:100_000]
+                lower = " ".join(text.lower().split())
+                formatted_markers = (
+                    "statement of account" in lower
+                    or "withdrawal amt" in lower
+                    or "deposit amt" in lower
+                    or "chq./ref.no" in lower
+                    or "value dt" in lower and "closing balance" in lower
+                )
+                staged_path.unlink(missing_ok=True)
+                if formatted_markers:
+                    raise UploadRejected(
+                        UNSUPPORTED_TEXT_LAYOUT,
+                        "HDFC formatted text is not supported; download the Delimited format",
+                    )
+                raise UploadRejected(
+                    UNSUPPORTED_TEXT_FORMAT,
+                    "unrecognized text statement; for HDFC, download the Delimited format",
+                )
 
     return StatementSource(
         path=staged_path,
