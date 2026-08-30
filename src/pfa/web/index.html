@@ -259,7 +259,8 @@
                     </div>
                     <div class="dropzone-text">
                       <h3>Drag &amp; drop bank statement here</h3>
-                      <p>Supports <strong>PDF Statements</strong>, <strong>CSV exports</strong>, or <strong>scanned documents</strong></p>
+                      <p>Supports <strong>PDF statements</strong>, <strong>CSV exports</strong>, or <strong>HDFC Delimited text</strong></p>
+                      <small>HDFC customers: choose <strong>Delimited</strong> when downloading.</small>
                     </div>
                     <button class="button-primary" type="button" id="browse-button">
                       Browse Files
@@ -268,6 +269,7 @@
                       <span class="format-pill">PDF with native text</span>
                       <span class="format-pill">PDF with OCR fallback</span>
                       <span class="format-pill">Bank CSV exports</span>
+                      <span class="format-pill">HDFC Delimited .txt</span>
                     </div>
                   </div>
                 </div>
@@ -318,8 +320,30 @@
                           <option value="loan">Loan</option>
                         </select>
                       </div>
+                      <div id="hdfc-account-fields" hidden>
+                        <div class="account-input-group">
+                          <label for="new-account-currency">Currency</label>
+                          <input id="new-account-currency" class="text-input" value="INR" readonly />
+                          <label class="checkbox-label"><input id="confirm-account-currency" type="checkbox" /> Confirm INR</label>
+                        </div>
+                        <div class="account-input-group">
+                          <label for="new-account-institution">Institution</label>
+                          <input id="new-account-institution" class="text-input" value="hdfc_bank" readonly />
+                        </div>
+                        <div class="account-input-group">
+                          <label for="new-account-opening-balance">Derived opening balance</label>
+                          <input id="new-account-opening-balance" class="text-input" type="number" step="0.01" />
+                          <label for="new-account-opening-as-of">As of</label>
+                          <input id="new-account-opening-as-of" class="text-input" type="date" />
+                        </div>
+                        <label class="checkbox-label"><input id="confirm-opening-balance" type="checkbox" /> Confirm the derived opening balance</label>
+                        <small id="hdfc-opening-help">The suggested balance is derived from the first statement row.</small>
+                      </div>
                       <small id="account-help">Account names are labels; PFA binds imports by account ID.</small>
                     </details>
+                    <div id="hdfc-legacy-correction" hidden>
+                      <label class="checkbox-label"><input id="mark-hdfc-account" type="checkbox" /> Mark this legacy account as HDFC Bank</label>
+                    </div>
                   </div>
                 </div>
 
@@ -340,6 +364,7 @@
                 </div>
 
                 <div class="batch-semantic-summary" id="batch-semantic-summary" aria-live="polite"></div>
+                <div class="batch-reconciliation" id="batch-reconciliation" aria-live="polite"></div>
 
                 <!-- BATCH STATS & FILTERS -->
                 <div class="batch-metrics-bar">

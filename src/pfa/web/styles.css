@@ -1524,6 +1524,34 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   flex-wrap: wrap;
 }
 
+#hdfc-account-fields {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  color: var(--ink-secondary);
+}
+
+.checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-secondary);
+}
+
+.batch-reconciliation {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 28px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.batch-reconciliation strong {
+  color: var(--ink);
+}
+
 .batch-semantic-summary {
   display: flex;
   flex-wrap: wrap;

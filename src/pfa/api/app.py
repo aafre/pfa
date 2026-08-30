@@ -97,6 +97,12 @@ class NewAccountRequest(BaseModel):
     last4: str | None = Field(default=None, min_length=4, max_length=4, pattern=r"^\d{4}$")
     opening_balance_minor: int = 0
     opening_balance_as_of: date | None = None
+    opening_balance_confirmed: bool = False
+    currency_confirmed: bool = False
+
+
+class AccountMetadataUpdateRequest(BaseModel):
+    institution: Literal["hdfc_bank"]
 
 
 class CandidateIssueResponse(BaseModel):
@@ -113,6 +119,7 @@ class CandidateResponse(BaseModel):
     normalized_description: str
     amount_minor: int | None
     direction: str | None
+    direction_explicit: bool
     currency: str
     account_hint: str | None
     account_id: int | None
@@ -148,6 +155,9 @@ class ImportBatchResponse(BaseModel):
     detection_reason_codes: list[str]
     detected_institution: str | None
     detected_account_hint: str | None
+    suggested_currency: str | None
+    currency_evidence: str | None
+    compatible_account_types: list[str]
     reconciliation: dict[str, object] | None
     semantic_totals: dict[str, int]
     amount_sign: str | None
@@ -170,6 +180,7 @@ class ImportBatchPatchRequest(BaseModel):
     account: str | None = None  # deprecated label compatibility
     destination_account_id: int | None = Field(default=None, gt=0)
     new_account: NewAccountRequest | None = None
+    account_metadata_update: AccountMetadataUpdateRequest | None = None
     excluded_candidate_ids: list[str] | None = None
 
     @model_validator(mode="after")
@@ -177,9 +188,13 @@ class ImportBatchPatchRequest(BaseModel):
         if self.destination_account_id is not None and self.new_account is not None:
             raise ValueError("choose destination_account_id or new_account, not both")
         if self.account is not None and (
-            self.destination_account_id is not None or self.new_account is not None
+            self.destination_account_id is not None
+            or self.new_account is not None
+            or self.account_metadata_update is not None
         ):
             raise ValueError("account is a legacy alias; use one stable binding")
+        if self.account_metadata_update is not None and self.destination_account_id is None:
+            raise ValueError("account_metadata_update requires destination_account_id")
         return self
 
     # Both are closed sets: an unrecognised value is a 422, not a silent no-op.
@@ -264,6 +279,7 @@ def _candidate_response(candidate: CandidateTransaction) -> CandidateResponse:
         normalized_description=candidate.normalized_description,
         amount_minor=candidate.amount_minor,
         direction=candidate.direction,
+        direction_explicit=candidate.direction_explicit,
         currency=candidate.currency,
         account_hint=candidate.account_hint,
         account_id=candidate.account_id,
@@ -309,6 +325,13 @@ def _batch_response(batch: ImportBatchModel) -> ImportBatchResponse:
         ),
         detected_institution=batch.detected_institution,
         detected_account_hint=batch.detected_account_hint,
+        suggested_currency=batch.suggested_currency,
+        currency_evidence=batch.currency_evidence,
+        compatible_account_types=(
+            json.loads(batch.compatible_account_types_json)
+            if batch.compatible_account_types_json
+            else []
+        ),
         reconciliation=(
             json.loads(batch.reconciliation_json) if batch.reconciliation_json else None
         ),
@@ -482,6 +505,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         else None
                     ),
                     excluded_candidate_ids=request.excluded_candidate_ids,
+                    account_metadata_update=(
+                        request.account_metadata_update.model_dump()
+                        if request.account_metadata_update
+                        else None
+                    ),
                     amount_mode=request.amount_mode,
                     amount_sign=request.amount_sign,
                 ),

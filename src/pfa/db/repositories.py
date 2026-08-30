@@ -103,11 +103,17 @@ class AccountRepository:
             raise ValueError(f"unsupported account currency {currency!r}")
         if last4 is not None and (len(last4) != 4 or not last4.isdigit()):
             raise ValueError("last4 must contain exactly four digits")
+        institution_value = institution.strip() if institution else None
+        if institution_value and institution_value.casefold().replace(" ", "_") in {
+            "hdfc",
+            "hdfc_bank",
+        }:
+            institution_value = "hdfc_bank"
         account = AccountModel(
             name=name.strip(),
             currency=currency,
             account_type=account_type,
-            institution=institution.strip() if institution else None,
+            institution=institution_value,
             last4=last4,
             opening_balance_minor=opening_balance_minor,
             opening_balance_as_of=opening_balance_as_of,

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import csv
+import io
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -27,6 +29,16 @@ class Dialect:
     two_column: bool = False
     compatible_account_types: frozenset[AccountType] = frozenset()
     institution: str | None = None
+    suggested_currency: str | None = None
+    currency_evidence: str | None = None
+    explicit_source_direction: bool = False
+    header_signature: tuple[str, ...] = ()
+
+    def header_matches(self, cells: list[str]) -> bool:
+        if not self.header_signature:
+            return False
+        normalized = tuple(re.sub(r"\s+", " ", cell.strip()).casefold() for cell in cells)
+        return normalized == self.header_signature
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +49,19 @@ class AdapterDetection:
     institution: str | None = None
     account_hint: str | None = None
     currency: str | None = None
+    suggested_currency: str | None = None
+    currency_evidence: str | None = None
 
+
+HDFC_HEADERS = (
+    "date",
+    "narration",
+    "value dat",
+    "debit amount",
+    "credit amount",
+    "chq/ref number",
+    "closing balance",
+)
 
 GENERIC = Dialect()
 
@@ -86,6 +110,18 @@ BARCLAYCARD = replace(
     compatible_account_types=frozenset({AccountType.CREDIT_CARD}),
     institution="Barclaycard",
 )
+HDFC_IN_DELIMITED = replace(
+    GENERIC,
+    name="hdfc_in_delimited",
+    adapter_id="hdfc_in_delimited_v1",
+    date_formats=("%d/%m/%Y", "%d/%m/%y"),
+    compatible_account_types=frozenset({AccountType.CURRENT, AccountType.SAVINGS}),
+    institution="hdfc_bank",
+    suggested_currency="INR",
+    currency_evidence="adapter_suggestion",
+    explicit_source_direction=True,
+    header_signature=HDFC_HEADERS,
+)
 
 DIALECTS: dict[str, Dialect] = {
     "generic": GENERIC,
@@ -96,6 +132,7 @@ DIALECTS: dict[str, Dialect] = {
     "hsbc_uk_current": HSBC_UK_CURRENT,
     "hsbc": HSBC_UK_CURRENT,
     "barclaycard": BARCLAYCARD,
+    "hdfc_in_delimited_v1": HDFC_IN_DELIMITED,
 }
 
 
@@ -121,9 +158,19 @@ def _csv_detection(path: Path) -> AdapterDetection:
     text = _csv_text(path)
     lower = text.lower()
     try:
-        header = next(csv.reader(text.splitlines()), [])
+        reader = csv.reader(io.StringIO(text))
+        header = next((row for row in reader if any(cell.strip() for cell in row)), [])
     except csv.Error:
         header = []
+    if HDFC_IN_DELIMITED.header_matches(header):
+        return AdapterDetection(
+            HDFC_IN_DELIMITED,
+            0.99,
+            ("hdfc_delimited_header", "explicit_source_columns"),
+            institution="hdfc_bank",
+            suggested_currency="INR",
+            currency_evidence="adapter_suggestion",
+        )
     headers = {" ".join(cell.strip().lower().split()) for cell in header}
     if (
         "card member" in lower

@@ -145,6 +145,9 @@ class ImportBatchModel(Base):
     detection_reason_codes_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     detected_institution: Mapped[str | None] = mapped_column(String(120), nullable=True)
     detected_account_hint: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    suggested_currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    currency_evidence: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    compatible_account_types_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     reconciliation_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The sign convention the user declared for this source, kept so the preview can be
     # rebuilt after a refresh and so a committed batch records how it read its amounts.
