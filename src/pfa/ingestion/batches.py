@@ -37,6 +37,7 @@ from .candidates import (
     BATCH_HAS_BLOCKING_ERRORS,
     BATCH_NOT_EDITABLE,
     BATCH_NOT_FOUND,
+    DUPLICATE_ACCOUNT_SUSPECTED,
     ERROR,
     EXTRACTION_FAILED,
     EXTRACTION_TIMEOUT,
@@ -160,6 +161,10 @@ def batch_committed_transaction_ids(batch: ImportBatchModel) -> list[int]:
 
 def batch_semantic_totals(batch: ImportBatchModel) -> dict[str, int]:
     """Calculate preview figures from candidate signs, never from model-generated text."""
+    if not batch.candidates_json and batch.reconciliation_json:
+        saved = json.loads(batch.reconciliation_json).get("semantic_totals")
+        if isinstance(saved, dict):
+            return {str(key): int(value) for key, value in saved.items()}
     spending = refunds = transfers = repayments = money_in = 0
     for candidate in batch_candidates(batch):
         signed = candidate.signed_amount_minor
@@ -297,6 +302,7 @@ _BINDING_CODES = {
     ACCOUNT_NOT_FOUND,
     ACCOUNT_REQUIRED,
     ACCOUNT_TYPE_MISMATCH,
+    DUPLICATE_ACCOUNT_SUSPECTED,
     INVALID_ACCOUNT_DRAFT,
     GENERIC_SIGN_CONFIRMATION_REQUIRED,
     RECONCILIATION_INCOMPLETE,
@@ -371,6 +377,23 @@ def _binding_issues(
                 )
             for existing in uow.accounts.by_name(draft.name.strip()):
                 if (
+                    existing.account_type == account_type.value
+                    and existing.currency.upper() == draft.currency.upper()
+                    and existing.institution
+                    and draft.institution
+                    and existing.institution.upper() == draft.institution.upper()
+                    and existing.last4
+                    and existing.last4 == draft.last4
+                ):
+                    issues.append(
+                        CandidateIssue(
+                            DUPLICATE_ACCOUNT_SUSPECTED,
+                            "an account with the same details already exists; "
+                            "confirm this destination",
+                            WARNING,
+                        )
+                    )
+                elif (
                     existing.account_type != account_type.value
                     or existing.currency.upper() != draft.currency.upper()
                 ):
@@ -804,6 +827,14 @@ def commit_batch(uow: UnitOfWork, batch_id: str, settings: Settings) -> ImportBa
     from .transfers import match_transfers
 
     match_transfers(uow)
+    if account is not None:
+        batch.destination_account = account.name
+        batch.destination_account_id = account.id
+        batch.new_account_json = None
+    semantic_totals = batch_semantic_totals(batch)
+    reconciliation = json.loads(batch.reconciliation_json) if batch.reconciliation_json else {}
+    reconciliation["semantic_totals"] = semantic_totals
+    batch.reconciliation_json = json.dumps(reconciliation)
 
     batch.status = "committed"
     batch.committed_at = _now()
