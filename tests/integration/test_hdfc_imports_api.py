@@ -152,6 +152,7 @@ def test_hdfc_balance_mismatch_blocks_without_raw_values_in_issue(tmp_path) -> N
         issue for issue in body["issues"] if issue["code"] == "BALANCE_RECONCILIATION_FAILED"
     )
     assert balance_issue["severity"] == "error"
+    assert "source row(s) 3" in balance_issue["message"]
     assert "102,000" not in balance_issue["message"]
     assert body["reconciliation"]["mismatch_source_rows"] == [3]
 

@@ -573,12 +573,16 @@ def _set_reconciliation(
     if batch.adapter_id not in (None, "generic"):
         issues: list[CandidateIssue] = []
         if result["arithmetic_integrity"] == "mismatch":
+            mismatch_rows = result.get("mismatch_source_rows", [])
+            message = "statement balances do not reconcile"
+            if mismatch_rows:
+                message += "; check source row(s) " + ", ".join(map(str, mismatch_rows))
             issues.append(
                 CandidateIssue(
                     BALANCE_RECONCILIATION_FAILED
                     if batch.adapter_id == "hdfc_in_delimited_v1"
                     else RECONCILIATION_MISMATCH,
-                    "statement balances do not reconcile",
+                    message,
                 )
             )
         if result["coverage_integrity"] == "incomplete":

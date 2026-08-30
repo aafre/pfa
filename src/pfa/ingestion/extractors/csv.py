@@ -170,6 +170,10 @@ class CsvStatementExtractor:
         self.currency = currency
 
     def extract(self, source: StatementSource) -> ExtractionResult:
+        if self.dialect.adapter_id == "hdfc_in_delimited_v1":
+            from .hdfc import HdfcDelimitedExtractor
+
+            return HdfcDelimitedExtractor(dialect=self.dialect).extract(source)
         result = ExtractionResult(extractor=self.name)
         positional = False
         try:
