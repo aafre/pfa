@@ -23,10 +23,13 @@ class Base(DeclarativeBase):
 class AccountModel(Base):
     __tablename__ = "accounts"
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(120), unique=True)
+    name: Mapped[str] = mapped_column(String(120))
     account_type: Mapped[str] = mapped_column(String(30), default="current")
     currency: Mapped[str] = mapped_column(String(3), default="GBP")
+    institution: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    last4: Mapped[str | None] = mapped_column(String(4), nullable=True)
     opening_balance_minor: Mapped[int] = mapped_column(Integer, default=0)
+    opening_balance_as_of: Mapped[date | None] = mapped_column(Date, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     transactions: Mapped[list[TransactionModel]] = relationship(back_populates="account")
 
@@ -58,6 +61,42 @@ class TransactionModel(Base):
         DateTime, server_default=func.now(), onupdate=func.now()
     )
     account: Mapped[AccountModel] = relationship(back_populates="transactions")
+
+
+class TransferEventModel(Base):
+    __tablename__ = "transfer_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    purpose: Mapped[str] = mapped_column(String(30), default="other")
+    match_method: Mapped[str] = mapped_column(String(30))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    legs: Mapped[list[TransferLegModel]] = relationship(
+        back_populates="event", cascade="all, delete-orphan"
+    )
+
+
+class TransferLegModel(Base):
+    __tablename__ = "transfer_legs"
+    __table_args__ = (UniqueConstraint("transaction_id", name="uq_transfer_legs_transaction"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("transfer_events.id"))
+    transaction_id: Mapped[int] = mapped_column(ForeignKey("transactions.id"))
+    role: Mapped[str] = mapped_column(String(20))
+    event: Mapped[TransferEventModel] = relationship(back_populates="legs")
+
+
+class TransferMatchDecisionModel(Base):
+    __tablename__ = "transfer_match_decisions"
+    __table_args__ = (UniqueConstraint("stable_match_key", name="uq_transfer_match_key"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    stable_match_key: Mapped[str] = mapped_column(String(64))
+    left_transaction_id: Mapped[int] = mapped_column(ForeignKey("transactions.id"))
+    right_transaction_id: Mapped[int] = mapped_column(ForeignKey("transactions.id"))
+    state: Mapped[str] = mapped_column(String(20))
+    confidence: Mapped[float] = mapped_column()
+    reason_codes_json: Mapped[str] = mapped_column(Text, default="[]")
+    event_id: Mapped[int | None] = mapped_column(ForeignKey("transfer_events.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class BudgetModel(Base):
@@ -97,6 +136,16 @@ class ImportBatchModel(Base):
     extractor: Mapped[str] = mapped_column(String(60))
     status: Mapped[str] = mapped_column(String(20), index=True)
     destination_account: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    destination_account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("accounts.id"), nullable=True, index=True
+    )
+    new_account_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    adapter_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    detection_confidence: Mapped[float | None] = mapped_column(nullable=True)
+    detection_reason_codes_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    detected_institution: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    detected_account_hint: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    reconciliation_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The sign convention the user declared for this source, kept so the preview can be
     # rebuilt after a refresh and so a committed batch records how it read its amounts.
     amount_sign: Mapped[str | None] = mapped_column(String(20), nullable=True)

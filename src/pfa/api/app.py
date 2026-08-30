@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import date, datetime
@@ -8,7 +9,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_ai import UsageLimits
 from starlette.requests import Request
 from starlette.responses import Response
@@ -19,24 +20,39 @@ from pfa.ai.agents.categorizer import LocalTransactionClassifier
 from pfa.ai.deps import FinanceDependencies
 from pfa.ai.models import available_models
 from pfa.ai.schemas import ChatRequest, ImportRequest
+from pfa.analytics.service import cash_position
 from pfa.config import Settings, get_settings
-from pfa.db.models import ImportBatchModel
+from pfa.db.models import (
+    ImportBatchModel,
+    TransferEventModel,
+    TransferMatchDecisionModel,
+)
+from pfa.domain.accounts import AccountType
 from pfa.domain.errors import BatchError, UploadRejected
+from pfa.domain.transactions import TransferLegRole, TransferPurpose, signed_minor
 from pfa.ingestion.batches import (
     BatchPatch,
+    NewAccountDraft,
     apply_patch,
     batch_candidates,
     batch_committed_transaction_ids,
     batch_counts,
     batch_issues,
+    batch_semantic_totals,
     commit_batch,
     create_batch,
     discard_batch,
     load_batch,
     sweep_expired_batches,
+    undo_batch,
 )
 from pfa.ingestion.candidates import FILE_TOO_LARGE, CandidateIssue, CandidateTransaction
 from pfa.ingestion.service import ImportService
+from pfa.ingestion.transfers import (
+    accept_suggestion,
+    create_manual_link,
+    dismiss_suggestion,
+)
 from pfa.ingestion.upload import stage_upload, sweep_upload_dir
 from pfa.observability import TimedOperation
 from pfa.services.answers import deterministic_answer
@@ -57,6 +73,8 @@ class TransactionResponse(BaseModel):
     kind: str
     category: str | None
     classification_source: str
+    signed_amount_minor: int
+    account_id: int
 
 
 class AccountResponse(BaseModel):
@@ -64,6 +82,21 @@ class AccountResponse(BaseModel):
     name: str
     account_type: str
     currency: str
+    institution: str | None = None
+    last4: str | None = None
+    opening_balance_minor: int = 0
+    opening_balance_as_of: date | None = None
+    active: bool = True
+
+
+class NewAccountRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    account_type: AccountType = AccountType.CURRENT
+    currency: str = Field(default="GBP", min_length=3, max_length=3)
+    institution: str | None = Field(default=None, max_length=120)
+    last4: str | None = Field(default=None, min_length=4, max_length=4, pattern=r"^\d{4}$")
+    opening_balance_minor: int = 0
+    opening_balance_as_of: date | None = None
 
 
 class CandidateIssueResponse(BaseModel):
@@ -82,6 +115,8 @@ class CandidateResponse(BaseModel):
     direction: str | None
     currency: str
     account_hint: str | None
+    account_id: int | None
+    signed_amount_minor: int | None
     external_id: str | None
     kind: str | None
     category: str | None
@@ -106,6 +141,15 @@ class ImportBatchResponse(BaseModel):
     sha256: str
     extractor: str
     destination_account: str | None
+    destination_account_id: int | None
+    new_account: NewAccountRequest | None
+    adapter_id: str | None
+    detection_confidence: float | None
+    detection_reason_codes: list[str]
+    detected_institution: str | None
+    detected_account_hint: str | None
+    reconciliation: dict[str, object] | None
+    semantic_totals: dict[str, int]
     amount_sign: str | None
     detected_account: str | None
     detected_currency: str | None
@@ -123,11 +167,60 @@ class ImportBatchResponse(BaseModel):
 
 
 class ImportBatchPatchRequest(BaseModel):
-    account: str | None = None
+    account: str | None = None  # deprecated label compatibility
+    destination_account_id: int | None = Field(default=None, gt=0)
+    new_account: NewAccountRequest | None = None
     excluded_candidate_ids: list[str] | None = None
+
+    @model_validator(mode="after")
+    def one_binding(self) -> ImportBatchPatchRequest:
+        if self.destination_account_id is not None and self.new_account is not None:
+            raise ValueError("choose destination_account_id or new_account, not both")
+        if self.account is not None and (
+            self.destination_account_id is not None or self.new_account is not None
+        ):
+            raise ValueError("account is a legacy alias; use one stable binding")
+        return self
+
     # Both are closed sets: an unrecognised value is a 422, not a silent no-op.
     amount_mode: Literal["debit", "credit"] | None = None
     amount_sign: Literal["as_written", "debit_positive"] | None = None
+
+
+class UndoImportRequest(BaseModel):
+    confirm_changed: bool = False
+
+
+class TransferLegRequest(BaseModel):
+    transaction_id: int = Field(gt=0)
+    role: TransferLegRole
+
+
+class TransferLinkRequest(BaseModel):
+    legs: list[TransferLegRequest] = Field(min_length=2)
+    purpose: str = TransferPurpose.OTHER.value
+
+
+class TransferSuggestionResponse(BaseModel):
+    id: int
+    left_transaction_id: int
+    right_transaction_id: int
+    state: str
+    confidence: float
+    reason_codes: list[str]
+    event_id: int | None
+
+
+class TransferLegResponse(BaseModel):
+    transaction_id: int
+    role: str
+
+
+class TransferEventResponse(BaseModel):
+    id: int
+    purpose: str
+    match_method: str
+    legs: list[TransferLegResponse]
 
 
 class ScenarioRequest(BaseModel):
@@ -173,6 +266,8 @@ def _candidate_response(candidate: CandidateTransaction) -> CandidateResponse:
         direction=candidate.direction,
         currency=candidate.currency,
         account_hint=candidate.account_hint,
+        account_id=candidate.account_id,
+        signed_amount_minor=candidate.signed_amount_minor,
         external_id=candidate.external_id,
         kind=candidate.kind,
         category=candidate.category,
@@ -199,6 +294,25 @@ def _batch_response(batch: ImportBatchModel) -> ImportBatchResponse:
         sha256=batch.sha256,
         extractor=batch.extractor,
         destination_account=batch.destination_account,
+        destination_account_id=batch.destination_account_id,
+        new_account=(
+            NewAccountRequest(**json.loads(batch.new_account_json))
+            if batch.new_account_json
+            else None
+        ),
+        adapter_id=batch.adapter_id,
+        detection_confidence=batch.detection_confidence,
+        detection_reason_codes=(
+            json.loads(batch.detection_reason_codes_json)
+            if batch.detection_reason_codes_json
+            else []
+        ),
+        detected_institution=batch.detected_institution,
+        detected_account_hint=batch.detected_account_hint,
+        reconciliation=(
+            json.loads(batch.reconciliation_json) if batch.reconciliation_json else None
+        ),
+        semantic_totals=batch_semantic_totals(batch),
         amount_sign=batch.amount_sign,
         detected_account=batch.detected_account,
         detected_currency=batch.detected_currency,
@@ -284,6 +398,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request,
         file: UploadFile = File(...),  # noqa: B008 - FastAPI's dependency-injection idiom
         account: str | None = Form(None),  # noqa: B008
+        destination_account_id: int | None = Form(None),  # noqa: B008
+        new_account_name: str | None = Form(None),  # noqa: B008
+        new_account_type: AccountType = Form(AccountType.CURRENT),  # noqa: B008
+        new_account_currency: str = Form("GBP"),  # noqa: B008
     ) -> ImportBatchResponse:
         content_length = request.headers.get("content-length")
         # A header the client controls must not be able to turn a bad request into a 500;
@@ -300,7 +418,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             engine, services = open_services(active_settings)
             try:
-                batch = create_batch(services.uow, source, active_settings, account=account)
+                draft = (
+                    NewAccountRequest(
+                        name=new_account_name,
+                        account_type=new_account_type,
+                        currency=new_account_currency,
+                    )
+                    if new_account_name
+                    else None
+                )
+                batch = create_batch(
+                    services.uow,
+                    source,
+                    active_settings,
+                    account=account,
+                    destination_account_id=destination_account_id,
+                    new_account=NewAccountDraft(**draft.model_dump()) if draft else None,
+                )
                 response = _batch_response(batch)
                 close_services(engine, services)
                 return response
@@ -341,6 +475,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 batch_id,
                 BatchPatch(
                     account=request.account,
+                    destination_account_id=request.destination_account_id,
+                    new_account=(
+                        NewAccountDraft(**request.new_account.model_dump())
+                        if request.new_account
+                        else None
+                    ),
                     excluded_candidate_ids=request.excluded_candidate_ids,
                     amount_mode=request.amount_mode,
                     amount_sign=request.amount_sign,
@@ -363,6 +503,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         engine, services = open_services(active_settings)
         try:
             batch = commit_batch(services.uow, batch_id, active_settings)
+            response = _batch_response(batch)
+            close_services(engine, services)
+            return response
+        except BatchError as exc:
+            close_services(engine, services, False)
+            raise HTTPException(
+                status_code=exc.status_code, detail={"code": exc.code, "message": exc.message}
+            ) from exc
+        except Exception:
+            close_services(engine, services, False)
+            raise
+
+    @app.post("/imports/{batch_id}/undo", response_model=ImportBatchResponse)
+    def undo_import_batch(
+        batch_id: str, request: UndoImportRequest | None = None
+    ) -> ImportBatchResponse:
+        engine, services = open_services(active_settings)
+        try:
+            batch = undo_batch(
+                services.uow,
+                batch_id,
+                confirm_changed=request.confirm_changed if request else False,
+            )
             response = _batch_response(batch)
             close_services(engine, services)
             return response
@@ -398,12 +561,53 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             return [
                 AccountResponse(
-                    id=acc.id, name=acc.name, account_type=acc.account_type, currency=acc.currency
+                    id=acc.id,
+                    name=acc.name,
+                    account_type=acc.account_type,
+                    currency=acc.currency,
+                    institution=acc.institution,
+                    last4=acc.last4,
+                    opening_balance_minor=acc.opening_balance_minor,
+                    opening_balance_as_of=acc.opening_balance_as_of,
+                    active=acc.active,
                 )
                 for acc in services.uow.accounts.all()
             ]
         finally:
             close_services(engine, services)
+
+    @app.post("/accounts", response_model=AccountResponse)
+    def create_account(request: NewAccountRequest) -> AccountResponse:
+        engine, services = open_services(active_settings)
+        try:
+            account = services.uow.accounts.create(
+                request.name,
+                request.currency,
+                request.account_type.value,
+                institution=request.institution,
+                last4=request.last4,
+                opening_balance_minor=request.opening_balance_minor,
+                opening_balance_as_of=request.opening_balance_as_of,
+            )
+            response = AccountResponse(
+                id=account.id,
+                name=account.name,
+                account_type=account.account_type,
+                currency=account.currency,
+                institution=account.institution,
+                last4=account.last4,
+                opening_balance_minor=account.opening_balance_minor,
+                opening_balance_as_of=account.opening_balance_as_of,
+                active=account.active,
+            )
+            close_services(engine, services)
+            return response
+        except ValueError as exc:
+            close_services(engine, services, False)
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception:
+            close_services(engine, services, False)
+            raise
 
     @app.get("/transactions", response_model=list[TransactionResponse])
     def transactions(
@@ -424,11 +628,127 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     kind=row.kind,
                     category=row.category,
                     classification_source=row.classification_source,
+                    signed_amount_minor=(signed_minor(row.amount_minor, row.flow_direction)),
+                    account_id=row.account_id,
                 )
                 for row in rows
             ]
         finally:
             close_services(engine, services)
+
+    def _suggestion_response(
+        decision: TransferMatchDecisionModel,
+    ) -> TransferSuggestionResponse:
+        return TransferSuggestionResponse(
+            id=decision.id,
+            left_transaction_id=decision.left_transaction_id,
+            right_transaction_id=decision.right_transaction_id,
+            state=decision.state,
+            confidence=decision.confidence,
+            reason_codes=json.loads(decision.reason_codes_json),
+            event_id=decision.event_id,
+        )
+
+    def _event_response(event: TransferEventModel) -> TransferEventResponse:
+        return TransferEventResponse(
+            id=event.id,
+            purpose=event.purpose,
+            match_method=event.match_method,
+            legs=[
+                TransferLegResponse(transaction_id=leg.transaction_id, role=leg.role)
+                for leg in event.legs
+            ],
+        )
+
+    @app.get("/analytics/cash")
+    def cash(currency: str = "GBP", as_of: date | None = None) -> dict[str, object]:
+        engine, services = open_services(active_settings)
+        try:
+            position = cash_position(
+                services.uow.accounts.all(), services.uow.transactions.all(), currency, as_of
+            )
+            return {
+                "currency": position.currency,
+                "as_of": as_of,
+                "cash_minor": position.total_minor,
+                "known_subtotal_minor": position.known_subtotal_minor,
+                "coverage_status": position.coverage_status,
+                "missing_account_ids": list(position.missing_account_ids),
+            }
+        finally:
+            close_services(engine, services)
+
+    @app.get("/transfers/suggestions", response_model=list[TransferSuggestionResponse])
+    def transfer_suggestions() -> list[TransferSuggestionResponse]:
+        engine, services = open_services(active_settings)
+        try:
+            return [_suggestion_response(item) for item in services.uow.transfers.suggestions()]
+        finally:
+            close_services(engine, services)
+
+    @app.post("/transfers/suggestions/{decision_id}/accept", response_model=TransferEventResponse)
+    def accept_transfer_suggestion(decision_id: int) -> TransferEventResponse:
+        engine, services = open_services(active_settings)
+        try:
+            event = accept_suggestion(services.uow, decision_id)
+            response = _event_response(event)
+            close_services(engine, services)
+            return response
+        except BatchError as exc:
+            close_services(engine, services, False)
+            raise HTTPException(
+                status_code=exc.status_code, detail={"code": exc.code, "message": exc.message}
+            ) from exc
+
+    @app.post(
+        "/transfers/suggestions/{decision_id}/dismiss", response_model=TransferSuggestionResponse
+    )
+    def dismiss_transfer_suggestion(decision_id: int) -> TransferSuggestionResponse:
+        engine, services = open_services(active_settings)
+        try:
+            decision = dismiss_suggestion(services.uow, decision_id)
+            response = _suggestion_response(decision)
+            close_services(engine, services)
+            return response
+        except BatchError as exc:
+            close_services(engine, services, False)
+            raise HTTPException(
+                status_code=exc.status_code, detail={"code": exc.code, "message": exc.message}
+            ) from exc
+
+    @app.post("/transfers/link", response_model=TransferEventResponse)
+    def link_transfer(request: TransferLinkRequest) -> TransferEventResponse:
+        engine, services = open_services(active_settings)
+        try:
+            event = create_manual_link(
+                services.uow,
+                [(leg.transaction_id, leg.role.value) for leg in request.legs],
+                request.purpose,
+            )
+            response = _event_response(event)
+            close_services(engine, services)
+            return response
+        except BatchError as exc:
+            close_services(engine, services, False)
+            raise HTTPException(
+                status_code=exc.status_code, detail={"code": exc.code, "message": exc.message}
+            ) from exc
+
+    @app.delete("/transfers/events/{event_id}")
+    def unlink_transfer(event_id: int) -> dict[str, object]:
+        engine, services = open_services(active_settings)
+        try:
+            event = services.uow.transfers.get_event(event_id)
+            if event is None:
+                raise BatchError("TRANSFER_EVENT_NOT_FOUND", "transfer event not found", 404)
+            services.uow.transfers.delete_event(event_id)
+            close_services(engine, services)
+            return {"id": event_id, "unlinked": True}
+        except BatchError as exc:
+            close_services(engine, services, False)
+            raise HTTPException(
+                status_code=exc.status_code, detail={"code": exc.code, "message": exc.message}
+            ) from exc
 
     @app.get("/fx/rates", response_model=list[FxRateResponse])
     def get_fx_rates(

@@ -1508,6 +1508,37 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   min-width: 180px;
 }
 
+.new-account-details {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.new-account-details summary {
+  cursor: pointer;
+  color: var(--ink-secondary);
+  font-weight: 600;
+}
+
+.new-account-details[open] .account-input-group {
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.batch-semantic-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 28px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.batch-semantic-summary strong {
+  color: var(--ink);
+}
+
 /* BATCH METRICS BAR & TABS */
 .batch-metrics-bar {
   display: flex;

@@ -6,6 +6,8 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from pfa.domain.accounts import AccountType
+from pfa.domain.money import SUPPORTED_CURRENCIES
 from pfa.domain.transactions import TransactionKind
 
 from .models import (
@@ -16,6 +18,9 @@ from .models import (
     ImportBatchModel,
     MerchantRuleModel,
     TransactionModel,
+    TransferEventModel,
+    TransferLegModel,
+    TransferMatchDecisionModel,
 )
 
 
@@ -40,6 +45,13 @@ class TransactionRepository:
             .order_by(TransactionModel.transaction_date)
         )
         return list(self.session.scalars(statement))
+
+    def by_ids(self, ids: list[int]) -> list[TransactionModel]:
+        if not ids:
+            return []
+        return list(
+            self.session.scalars(select(TransactionModel).where(TransactionModel.id.in_(ids)))
+        )
 
     def find_fingerprint(self, fingerprint: str) -> TransactionModel | None:
         return self.session.scalar(
@@ -68,20 +80,63 @@ class AccountRepository:
     def __init__(self, session: Session):
         self.session = session
 
+    def get(self, account_id: int) -> AccountModel | None:
+        return self.session.get(AccountModel, account_id)
+
+    def create(
+        self,
+        name: str,
+        currency: str = "GBP",
+        account_type: str = AccountType.CURRENT.value,
+        *,
+        institution: str | None = None,
+        last4: str | None = None,
+        opening_balance_minor: int = 0,
+        opening_balance_as_of: date | None = None,
+        active: bool = True,
+    ) -> AccountModel:
+        if not name.strip():
+            raise ValueError("account name is required")
+        account_type = AccountType(account_type).value
+        currency = currency.upper()
+        if currency not in SUPPORTED_CURRENCIES:
+            raise ValueError(f"unsupported account currency {currency!r}")
+        if last4 is not None and (len(last4) != 4 or not last4.isdigit()):
+            raise ValueError("last4 must contain exactly four digits")
+        account = AccountModel(
+            name=name.strip(),
+            currency=currency,
+            account_type=account_type,
+            institution=institution.strip() if institution else None,
+            last4=last4,
+            opening_balance_minor=opening_balance_minor,
+            opening_balance_as_of=opening_balance_as_of,
+            active=active,
+        )
+        self.session.add(account)
+        self.session.flush()
+        return account
+
     def get_or_create(
         self, name: str, currency: str = "GBP", account_type: str = "current"
     ) -> AccountModel:
-        account = self.session.scalar(select(AccountModel).where(AccountModel.name == name))
+        account = self.get_by_name(name)
         if account is None:
-            account = AccountModel(name=name, currency=currency, account_type=account_type)
-            self.session.add(account)
-            self.session.flush()
+            account = self.create(name, currency, account_type)
         return account
 
     def get_by_name(self, name: str) -> AccountModel | None:
-        """Read-only lookup - never creates a row, so a preview never has the side effect
-        of persisting an account for a batch that might still be discarded."""
-        return self.session.scalar(select(AccountModel).where(AccountModel.name == name))
+        """Legacy label lookup; stable import binding uses ``get(account_id)``."""
+        return self.session.scalar(
+            select(AccountModel).where(AccountModel.name == name).order_by(AccountModel.id)
+        )
+
+    def by_name(self, name: str) -> list[AccountModel]:
+        return list(
+            self.session.scalars(
+                select(AccountModel).where(AccountModel.name == name).order_by(AccountModel.id)
+            )
+        )
 
     def all(self) -> list[AccountModel]:
         return list(self.session.scalars(select(AccountModel).order_by(AccountModel.name)))
@@ -143,6 +198,104 @@ class ImportBatchRepository:
             ImportBatchModel.status.in_(["preview_ready", "blocked"]),
         )
         return list(self.session.scalars(statement))
+
+
+class TransferRepository:
+    def __init__(self, session: Session):
+        self.session = session
+
+    def linked_transaction_ids(self) -> set[int]:
+        return set(self.session.scalars(select(TransferLegModel.transaction_id)))
+
+    def decision(self, stable_match_key: str) -> TransferMatchDecisionModel | None:
+        return self.session.scalar(
+            select(TransferMatchDecisionModel).where(
+                TransferMatchDecisionModel.stable_match_key == stable_match_key
+            )
+        )
+
+    def add_event(
+        self, event: TransferEventModel, legs: list[TransferLegModel]
+    ) -> TransferEventModel:
+        event.legs = legs
+        self.session.add(event)
+        self.session.flush()
+        return event
+
+    def add_decision(self, decision: TransferMatchDecisionModel) -> TransferMatchDecisionModel:
+        self.session.add(decision)
+        self.session.flush()
+        return decision
+
+    def get_event(self, event_id: int) -> TransferEventModel | None:
+        return self.session.get(TransferEventModel, event_id)
+
+    def decisions(self) -> list[TransferMatchDecisionModel]:
+        return list(self.session.scalars(select(TransferMatchDecisionModel)))
+
+    def suggestions(self) -> list[TransferMatchDecisionModel]:
+        return list(
+            self.session.scalars(
+                select(TransferMatchDecisionModel).where(
+                    TransferMatchDecisionModel.state == "suggested"
+                )
+            )
+        )
+
+    def delete_event(self, event_id: int) -> None:
+        event = self.session.get(TransferEventModel, event_id)
+        if event is not None:
+            now = datetime.now(UTC).replace(tzinfo=None)
+            for decision in self.session.scalars(
+                select(TransferMatchDecisionModel).where(
+                    TransferMatchDecisionModel.event_id == event_id
+                )
+            ):
+                decision.state = "dismissed"
+                decision.event_id = None
+                decision.reviewed_at = now
+            self.session.delete(event)
+            self.session.flush()
+
+    def delete_for_transactions(self, transaction_ids: set[int]) -> None:
+        if not transaction_ids:
+            return
+        legs = list(
+            self.session.scalars(
+                select(TransferLegModel).where(TransferLegModel.transaction_id.in_(transaction_ids))
+            )
+        )
+        event_ids = {leg.event_id for leg in legs}
+        for leg in legs:
+            self.session.delete(leg)
+        self.session.flush()
+        for event_id in event_ids:
+            remaining = self.session.scalar(
+                select(TransferLegModel.id).where(TransferLegModel.event_id == event_id).limit(1)
+            )
+            if remaining is None:
+                event = self.session.get(TransferEventModel, event_id)
+                if event is not None:
+                    self.session.delete(event)
+            elif (
+                len(
+                    self.session.scalars(
+                        select(TransferLegModel).where(TransferLegModel.event_id == event_id)
+                    ).all()
+                )
+                < 2
+            ):
+                event = self.session.get(TransferEventModel, event_id)
+                if event is not None:
+                    self.session.delete(event)
+        decisions = self.session.scalars(
+            select(TransferMatchDecisionModel).where(
+                (TransferMatchDecisionModel.left_transaction_id.in_(transaction_ids))
+                | (TransferMatchDecisionModel.right_transaction_id.in_(transaction_ids))
+            )
+        )
+        for decision in decisions:
+            self.session.delete(decision)
 
 
 class GoalRepository:

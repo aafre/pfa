@@ -296,12 +296,30 @@
                   </div>
 
                   <div class="account-selector-wrap">
-                    <label for="destination-account-input" class="account-label">Target Account:</label>
+                    <label for="destination-account-select" class="account-label">Target account:</label>
                     <div class="account-input-group">
-                      <input list="known-accounts-list" id="destination-account-input" class="text-input" placeholder="e.g. Main Checking" />
-                      <datalist id="known-accounts-list"></datalist>
+                      <select id="destination-account-select" class="select-input" aria-describedby="account-help">
+                        <option value="">Choose an existing account</option>
+                      </select>
                       <button class="button-secondary" type="button" id="save-account-btn">Assign</button>
                     </div>
+                    <details class="new-account-details">
+                      <summary>Create a new account</summary>
+                      <div class="account-input-group">
+                        <label class="sr-only" for="new-account-name">New account name</label>
+                        <input id="new-account-name" class="text-input" placeholder="Account name" />
+                        <label class="sr-only" for="new-account-type">New account type</label>
+                        <select id="new-account-type" class="select-input">
+                          <option value="current">Current account</option>
+                          <option value="savings">Savings</option>
+                          <option value="credit_card">Credit card</option>
+                          <option value="cash">Cash</option>
+                          <option value="investment">Investment</option>
+                          <option value="loan">Loan</option>
+                        </select>
+                      </div>
+                      <small id="account-help">Account names are labels; PFA binds imports by account ID.</small>
+                    </details>
                   </div>
                 </div>
 
@@ -320,6 +338,8 @@
                     </div>
                   </div>
                 </div>
+
+                <div class="batch-semantic-summary" id="batch-semantic-summary" aria-live="polite"></div>
 
                 <!-- BATCH STATS & FILTERS -->
                 <div class="batch-metrics-bar">
@@ -395,6 +415,7 @@
                   <div class="success-actions">
                     <a class="button-primary" href="#overview">View Updated Overview</a>
                     <a class="button-secondary" href="#activity">View Activity Ledger</a>
+                    <button class="button-ghost" type="button" id="undo-import-btn">Undo import</button>
                     <button class="button-ghost" type="button" id="upload-another-btn">Upload Another Statement</button>
                   </div>
                 </div>
