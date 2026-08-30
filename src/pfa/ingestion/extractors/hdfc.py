@@ -17,6 +17,9 @@ from pfa.domain.errors import ValidationError
 from pfa.domain.money import minor_units
 
 from ..candidates import (
+    HDFC_AMOUNT_SIDES_INVALID,
+    HDFC_HEADER_NOT_FOUND,
+    HDFC_ROW_WIDTH_INVALID,
     INVALID_AMOUNT,
     NO_HEADER_ROW,
     TOO_MANY_ROWS,
@@ -27,10 +30,6 @@ from ..candidates import (
     StatementSource,
 )
 from ..dialects import HDFC_HEADERS, HDFC_IN_DELIMITED, Dialect
-
-HDFC_HEADER_NOT_FOUND = "HDFC_HEADER_NOT_FOUND"
-HDFC_ROW_WIDTH_INVALID = "HDFC_ROW_WIDTH_INVALID"
-HDFC_AMOUNT_SIDES_INVALID = "HDFC_AMOUNT_SIDES_INVALID"
 
 
 def _clean_decimal(value: str) -> tuple[Decimal, bool]:
@@ -50,6 +49,8 @@ def _clean_decimal(value: str) -> tuple[Decimal, bool]:
 
 
 def _magnitude(value: str) -> int:
+    if not value.strip():
+        return 0
     decimal, negative = _clean_decimal(value)
     if negative or decimal < 0:
         raise ValueError
@@ -100,7 +101,6 @@ def _candidate(
         )
         return candidate
 
-    candidate.raw_fields["closing_balance_minor"] = str(_balance(closing))
     if (debit_minor > 0) == (credit_minor > 0):
         candidate.add_issue(
             HDFC_AMOUNT_SIDES_INVALID,
@@ -139,7 +139,7 @@ class HdfcDelimitedExtractor:
             result.issues.append(CandidateIssue(UNREADABLE_FILE, "could not read the statement"))
             return result
 
-        reader = csv.reader(io.StringIO(text))
+        reader = csv.reader(io.StringIO(text), strict=True)
         header: list[str] | None = None
         try:
             for row in reader:
