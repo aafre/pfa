@@ -248,6 +248,8 @@ def _process_lines_for_column(
     columns: list[tuple[float, str]] | None = None
     header_top: float | None = None
     rows: list[_RawRow] = []
+    pending_header: list[tuple[float, str, float | None]] = []
+    pending_header_top: float | None = None
     position = 0
     for line in lines:
         cells = _split_cells(line)
@@ -258,9 +260,18 @@ def _process_lines_for_column(
             continue
         if columns is None:
             columns = _header_columns(cells)
+            if columns is None and pending_header:
+                columns = _header_columns([*pending_header, *cells])
             if columns is not None:
-                header_top = line[0]["top"]
+                header_top = pending_header_top or line[0]["top"]
+                pending_header = []
+                pending_header_top = None
                 continue
+            names = {match_header_alias(text) for _, text, _ in cells}
+            names.discard(None)
+            if names and names != {"date"}:
+                pending_header = cells
+                pending_header_top = line[0]["top"]
             if len(cells) >= 2:
                 first_text = cells[0][1]
                 last_text = cells[-1][1]
@@ -413,9 +424,15 @@ def clean_amount_text(text: str) -> tuple[str, bool]:
     elif upper.endswith("CR"):
         cleaned = cleaned[:-2].strip()
         negative = False
+    elif upper.endswith("DR"):
+        cleaned = cleaned[:-2].strip()
+        negative = True
     elif upper.startswith("CR"):
         cleaned = cleaned[2:].strip()
         negative = False
+    elif upper.startswith("DR"):
+        cleaned = cleaned[2:].strip()
+        negative = True
     return cleaned, negative
 
 
@@ -438,10 +455,14 @@ def _resolve_amount(
     amount_text = fields.get("amount", "").strip()
 
     is_explicit_cr = False
+    is_explicit_dr = False
+    amount_upper = amount_text.upper()
     for marker in dialect.credit_markers:
-        if marker in amount_text.upper() or fields.get("type", "").upper() == marker:
+        if marker in amount_upper or fields.get("type", "").upper() == marker:
             is_explicit_cr = True
             break
+    if amount_upper.endswith("DR") or fields.get("type", "").upper() == "DR":
+        is_explicit_dr = True
 
     if amount_text:
         parsed = _signed_minor(amount_text, currency)
@@ -450,6 +471,8 @@ def _resolve_amount(
         minor, negative = parsed
         if is_explicit_cr:
             return _AmountResult(minor=minor, direction="credit", direction_explicit=True)
+        if is_explicit_dr:
+            return _AmountResult(minor=minor, direction="debit", direction_explicit=True)
         return _AmountResult(minor=minor, direction="debit" if negative else "credit")
 
     if debit_text and credit_text:

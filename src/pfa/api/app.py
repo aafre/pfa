@@ -20,10 +20,16 @@ from pfa.ai.agents.categorizer import LocalTransactionClassifier
 from pfa.ai.deps import FinanceDependencies
 from pfa.ai.models import available_models
 from pfa.ai.schemas import ChatRequest, ImportRequest
+from pfa.analytics.service import cash_position
 from pfa.config import Settings, get_settings
-from pfa.db.models import ImportBatchModel
+from pfa.db.models import (
+    ImportBatchModel,
+    TransferEventModel,
+    TransferMatchDecisionModel,
+)
 from pfa.domain.accounts import AccountType
 from pfa.domain.errors import BatchError, UploadRejected
+from pfa.domain.transactions import TransferLegRole, TransferPurpose, signed_minor
 from pfa.ingestion.batches import (
     BatchPatch,
     NewAccountDraft,
@@ -42,6 +48,11 @@ from pfa.ingestion.batches import (
 )
 from pfa.ingestion.candidates import FILE_TOO_LARGE, CandidateIssue, CandidateTransaction
 from pfa.ingestion.service import ImportService
+from pfa.ingestion.transfers import (
+    accept_suggestion,
+    create_manual_link,
+    dismiss_suggestion,
+)
 from pfa.ingestion.upload import stage_upload, sweep_upload_dir
 from pfa.observability import TimedOperation
 from pfa.services.answers import deterministic_answer
@@ -62,6 +73,8 @@ class TransactionResponse(BaseModel):
     kind: str
     category: str | None
     classification_source: str
+    signed_amount_minor: int
+    account_id: int
 
 
 class AccountResponse(BaseModel):
@@ -81,7 +94,7 @@ class NewAccountRequest(BaseModel):
     account_type: AccountType = AccountType.CURRENT
     currency: str = Field(default="GBP", min_length=3, max_length=3)
     institution: str | None = Field(default=None, max_length=120)
-    last4: str | None = Field(default=None, min_length=4, max_length=4, pattern=r"^\\d{4}$")
+    last4: str | None = Field(default=None, min_length=4, max_length=4, pattern=r"^\d{4}$")
     opening_balance_minor: int = 0
     opening_balance_as_of: date | None = None
 
@@ -176,6 +189,38 @@ class ImportBatchPatchRequest(BaseModel):
 
 class UndoImportRequest(BaseModel):
     confirm_changed: bool = False
+
+
+class TransferLegRequest(BaseModel):
+    transaction_id: int = Field(gt=0)
+    role: TransferLegRole
+
+
+class TransferLinkRequest(BaseModel):
+    legs: list[TransferLegRequest] = Field(min_length=2)
+    purpose: str = TransferPurpose.OTHER.value
+
+
+class TransferSuggestionResponse(BaseModel):
+    id: int
+    left_transaction_id: int
+    right_transaction_id: int
+    state: str
+    confidence: float
+    reason_codes: list[str]
+    event_id: int | None
+
+
+class TransferLegResponse(BaseModel):
+    transaction_id: int
+    role: str
+
+
+class TransferEventResponse(BaseModel):
+    id: int
+    purpose: str
+    match_method: str
+    legs: list[TransferLegResponse]
 
 
 class ScenarioRequest(BaseModel):
@@ -531,6 +576,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             close_services(engine, services)
 
+    @app.post("/accounts", response_model=AccountResponse)
+    def create_account(request: NewAccountRequest) -> AccountResponse:
+        engine, services = open_services(active_settings)
+        try:
+            account = services.uow.accounts.create(
+                request.name,
+                request.currency,
+                request.account_type.value,
+                institution=request.institution,
+                last4=request.last4,
+                opening_balance_minor=request.opening_balance_minor,
+                opening_balance_as_of=request.opening_balance_as_of,
+            )
+            response = AccountResponse(
+                id=account.id,
+                name=account.name,
+                account_type=account.account_type,
+                currency=account.currency,
+                institution=account.institution,
+                last4=account.last4,
+                opening_balance_minor=account.opening_balance_minor,
+                opening_balance_as_of=account.opening_balance_as_of,
+                active=account.active,
+            )
+            close_services(engine, services)
+            return response
+        except ValueError as exc:
+            close_services(engine, services, False)
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception:
+            close_services(engine, services, False)
+            raise
+
     @app.get("/transactions", response_model=list[TransactionResponse])
     def transactions(
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
@@ -550,11 +628,127 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     kind=row.kind,
                     category=row.category,
                     classification_source=row.classification_source,
+                    signed_amount_minor=(signed_minor(row.amount_minor, row.flow_direction)),
+                    account_id=row.account_id,
                 )
                 for row in rows
             ]
         finally:
             close_services(engine, services)
+
+    def _suggestion_response(
+        decision: TransferMatchDecisionModel,
+    ) -> TransferSuggestionResponse:
+        return TransferSuggestionResponse(
+            id=decision.id,
+            left_transaction_id=decision.left_transaction_id,
+            right_transaction_id=decision.right_transaction_id,
+            state=decision.state,
+            confidence=decision.confidence,
+            reason_codes=json.loads(decision.reason_codes_json),
+            event_id=decision.event_id,
+        )
+
+    def _event_response(event: TransferEventModel) -> TransferEventResponse:
+        return TransferEventResponse(
+            id=event.id,
+            purpose=event.purpose,
+            match_method=event.match_method,
+            legs=[
+                TransferLegResponse(transaction_id=leg.transaction_id, role=leg.role)
+                for leg in event.legs
+            ],
+        )
+
+    @app.get("/analytics/cash")
+    def cash(currency: str = "GBP", as_of: date | None = None) -> dict[str, object]:
+        engine, services = open_services(active_settings)
+        try:
+            position = cash_position(
+                services.uow.accounts.all(), services.uow.transactions.all(), currency, as_of
+            )
+            return {
+                "currency": position.currency,
+                "as_of": as_of,
+                "cash_minor": position.total_minor,
+                "known_subtotal_minor": position.known_subtotal_minor,
+                "coverage_status": position.coverage_status,
+                "missing_account_ids": list(position.missing_account_ids),
+            }
+        finally:
+            close_services(engine, services)
+
+    @app.get("/transfers/suggestions", response_model=list[TransferSuggestionResponse])
+    def transfer_suggestions() -> list[TransferSuggestionResponse]:
+        engine, services = open_services(active_settings)
+        try:
+            return [_suggestion_response(item) for item in services.uow.transfers.suggestions()]
+        finally:
+            close_services(engine, services)
+
+    @app.post("/transfers/suggestions/{decision_id}/accept", response_model=TransferEventResponse)
+    def accept_transfer_suggestion(decision_id: int) -> TransferEventResponse:
+        engine, services = open_services(active_settings)
+        try:
+            event = accept_suggestion(services.uow, decision_id)
+            response = _event_response(event)
+            close_services(engine, services)
+            return response
+        except BatchError as exc:
+            close_services(engine, services, False)
+            raise HTTPException(
+                status_code=exc.status_code, detail={"code": exc.code, "message": exc.message}
+            ) from exc
+
+    @app.post(
+        "/transfers/suggestions/{decision_id}/dismiss", response_model=TransferSuggestionResponse
+    )
+    def dismiss_transfer_suggestion(decision_id: int) -> TransferSuggestionResponse:
+        engine, services = open_services(active_settings)
+        try:
+            decision = dismiss_suggestion(services.uow, decision_id)
+            response = _suggestion_response(decision)
+            close_services(engine, services)
+            return response
+        except BatchError as exc:
+            close_services(engine, services, False)
+            raise HTTPException(
+                status_code=exc.status_code, detail={"code": exc.code, "message": exc.message}
+            ) from exc
+
+    @app.post("/transfers/link", response_model=TransferEventResponse)
+    def link_transfer(request: TransferLinkRequest) -> TransferEventResponse:
+        engine, services = open_services(active_settings)
+        try:
+            event = create_manual_link(
+                services.uow,
+                [(leg.transaction_id, leg.role.value) for leg in request.legs],
+                request.purpose,
+            )
+            response = _event_response(event)
+            close_services(engine, services)
+            return response
+        except BatchError as exc:
+            close_services(engine, services, False)
+            raise HTTPException(
+                status_code=exc.status_code, detail={"code": exc.code, "message": exc.message}
+            ) from exc
+
+    @app.delete("/transfers/events/{event_id}")
+    def unlink_transfer(event_id: int) -> dict[str, object]:
+        engine, services = open_services(active_settings)
+        try:
+            event = services.uow.transfers.get_event(event_id)
+            if event is None:
+                raise BatchError("TRANSFER_EVENT_NOT_FOUND", "transfer event not found", 404)
+            services.uow.transfers.delete_event(event_id)
+            close_services(engine, services)
+            return {"id": event_id, "unlinked": True}
+        except BatchError as exc:
+            close_services(engine, services, False)
+            raise HTTPException(
+                status_code=exc.status_code, detail={"code": exc.code, "message": exc.message}
+            ) from exc
 
     @app.get("/fx/rates", response_model=list[FxRateResponse])
     def get_fx_rates(

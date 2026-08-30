@@ -9,6 +9,7 @@ half-shared is a vocabulary the two extractors will drift apart on.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -77,7 +78,14 @@ UNDO_REQUIRES_CONFIRMATION = "UNDO_REQUIRES_CONFIRMATION"
 # lowercased and whitespace-collapsed - the spec forbids fuzzy guessing.
 HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "date": ("date", "transaction date", "transaction_date"),
-    "posted_date": ("posted date", "posted_date", "posting date", "posting_date"),
+    "posted_date": (
+        "posted date",
+        "posted_date",
+        "posting date",
+        "posting_date",
+        "received by us",
+        "receivedbyus",
+    ),
     "description": ("description", "details", "narrative", "merchant"),
     "debit": ("debit", "paid out", "paid_out", "withdrawn", "money out", "money_out"),
     "credit": ("credit", "paid in", "paid_in", "received", "money in", "money_in"),
@@ -88,11 +96,21 @@ HEADER_ALIASES: dict[str, tuple[str, ...]] = {
 
 
 def match_header_alias(cell_text: str) -> str | None:
-    """Maps one header cell onto its canonical field name, or None if nothing matches."""
-    normalized = " ".join(cell_text.strip().lower().split())
+    """Map deterministic bank-header variants onto one canonical field name."""
+    normalized = re.sub(r"[^a-z0-9]+", " ", cell_text.strip().lower()).strip()
+    compact = normalized.replace(" ", "")
     for field_name, aliases in HEADER_ALIASES.items():
-        if normalized in aliases:
-            return field_name
+        for alias in aliases:
+            alias_normalized = re.sub(r"[^a-z0-9]+", " ", alias).strip()
+            alias_compact = alias_normalized.replace(" ", "")
+            if normalized == alias_normalized or compact == alias_compact:
+                return field_name
+            if alias_normalized in normalized and field_name in {"description", "posted_date"}:
+                return field_name
+    if compact in {"transactiondate", "transactiondt"}:
+        return "date"
+    if compact in {"receivedbyus", "postingdate"}:
+        return "posted_date"
     return None
 
 
@@ -184,6 +202,7 @@ def parse_amount(value: str, currency: str = "GBP") -> tuple[int, int, bool]:
         .strip()
     )
     is_cr = False
+    is_dr = False
     upper = cleaned.upper()
     if upper.endswith("CR."):
         cleaned = cleaned[:-3].strip()
@@ -191,15 +210,21 @@ def parse_amount(value: str, currency: str = "GBP") -> tuple[int, int, bool]:
     elif upper.endswith("CR"):
         cleaned = cleaned[:-2].strip()
         is_cr = True
+    elif upper.endswith("DR"):
+        cleaned = cleaned[:-2].strip()
+        is_dr = True
     elif upper.startswith("CR"):
         cleaned = cleaned[2:].strip()
         is_cr = True
+    elif upper.startswith("DR"):
+        cleaned = cleaned[2:].strip()
+        is_dr = True
     try:
         decimal = Decimal(cleaned)
     except InvalidOperation as exc:
         raise ImportRowError(f"invalid amount {value!r}") from exc
-    sign = 1 if is_cr else (-1 if decimal < 0 else 1)
-    return sign, minor_units(abs(decimal), currency), is_cr
+    sign = 1 if is_cr else (-1 if decimal < 0 or is_dr else 1)
+    return sign, minor_units(abs(decimal), currency), is_cr or is_dr
 
 
 @dataclass(frozen=True, slots=True)

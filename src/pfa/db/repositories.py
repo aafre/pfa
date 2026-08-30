@@ -227,6 +227,12 @@ class TransferRepository:
         self.session.flush()
         return decision
 
+    def get_event(self, event_id: int) -> TransferEventModel | None:
+        return self.session.get(TransferEventModel, event_id)
+
+    def decisions(self) -> list[TransferMatchDecisionModel]:
+        return list(self.session.scalars(select(TransferMatchDecisionModel)))
+
     def suggestions(self) -> list[TransferMatchDecisionModel]:
         return list(
             self.session.scalars(
@@ -235,6 +241,12 @@ class TransferRepository:
                 )
             )
         )
+
+    def delete_event(self, event_id: int) -> None:
+        event = self.session.get(TransferEventModel, event_id)
+        if event is not None:
+            self.session.delete(event)
+            self.session.flush()
 
     def delete_for_transactions(self, transaction_ids: set[int]) -> None:
         if not transaction_ids:

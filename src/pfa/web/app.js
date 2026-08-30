@@ -202,9 +202,9 @@ function renderCurrentRoute() {
   $("nav-tx-count").textContent = state.transactions.length || (state.data[state.month]?.transaction_count || 0);
   if (state.accounts.length > 0) {
     $("active-account-label").textContent = state.accounts[0].name;
-    const knownList = $("known-accounts-list");
+    const knownList = $("destination-account-select");
     if (knownList) {
-      knownList.innerHTML = state.accounts.map((a) => `<option value="${escapeHtml(a.name)}">${escapeHtml(a.name)} (${escapeHtml(a.account_type)})</option>`).join("");
+      knownList.innerHTML = `<option value="">Choose an existing account</option>` + state.accounts.map((a) => `<option value="${a.id}">${escapeHtml(a.name)} (${escapeHtml(a.account_type)} · ${escapeHtml(a.currency)})</option>`).join("");
     }
   }
 
@@ -388,15 +388,20 @@ function setupUploadHandlers() {
   $("select-all-candidates").addEventListener("click", () => bulkToggleCandidates(true));
   $("deselect-all-candidates").addEventListener("click", () => bulkToggleCandidates(false));
 
-  // Destination Account Assign
+  // Destination Account Assign: existing accounts use stable IDs; new accounts are drafts
+  // and are only created with their transactions when the import is committed.
   $("save-account-btn").addEventListener("click", async () => {
-    const acc = $("destination-account-input").value.trim();
-    if (!acc || !state.activeBatch) return;
+    const selected = $("destination-account-select").value;
+    const newName = $("new-account-name").value.trim();
+    if ((!selected && !newName) || !state.activeBatch) return;
+    const body = selected
+      ? { destination_account_id: Number(selected) }
+      : { new_account: { name: newName, account_type: $("new-account-type").value, currency: state.activeBatch.detected_currency || "GBP" } };
     try {
       const patched = await apiRequest(`/imports/${state.activeBatch.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ account: acc })
+        body: JSON.stringify(body)
       });
       state.activeBatch = patched;
       showToast(`Assigned account "${acc}" to statement batch.`);
@@ -434,6 +439,33 @@ function setupUploadHandlers() {
       loadMonthData(state.month);
     } catch (err) {
       showToast(err.message, true);
+    }
+  });
+
+  $("undo-import-btn")?.addEventListener("click", async () => {
+    if (!state.activeBatch) return;
+    try {
+      await apiRequest(`/imports/${state.activeBatch.id}/undo`, { method: "POST" });
+      showToast("Import undone; account was kept.");
+      $("batch-success-card").hidden = true;
+      $("upload-card").hidden = false;
+      state.activeBatch = null;
+      loadMonthData(state.month);
+    } catch (err) {
+      if (err.data?.detail?.code === "UNDO_REQUIRES_CONFIRMATION" && window.confirm(err.message)) {
+        await apiRequest(`/imports/${state.activeBatch.id}/undo`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ confirm_changed: true })
+        });
+        showToast("Import undone; edited rows were removed.");
+        $("batch-success-card").hidden = true;
+        $("upload-card").hidden = false;
+        state.activeBatch = null;
+        loadMonthData(state.month);
+      } else {
+        showToast(err.message, true);
+      }
     }
   });
 
@@ -506,9 +538,20 @@ function renderBatchInspector(batch) {
   $("batch-pages").textContent = batch.page_count || "1";
   $("batch-period").textContent = batch.statement_start && batch.statement_end ? `${batch.statement_start} to ${batch.statement_end}` : "Auto-detected";
 
-  $("destination-account-input").value = batch.destination_account || batch.detected_account || "Main Checking";
+  $("destination-account-select").value = batch.destination_account_id ? String(batch.destination_account_id) : "";
+  $("new-account-name").value = batch.new_account?.name || "";
+  $("new-account-type").value = batch.new_account?.account_type || "current";
 
-  // Amount sign selector: show when all candidates have positive unsigned amounts
+  const semantic = batch.semantic_totals || {};
+  $("batch-semantic-summary").innerHTML = `
+    <strong>Import effect</strong>
+    <span>Money in ${formatMoney(semantic.money_in_minor || 0, batch.detected_currency || "GBP")}</span>
+    <span>Spending ${formatMoney(semantic.spending_minor || 0, batch.detected_currency || "GBP")}</span>
+    <span>Refunds ${formatMoney(semantic.refunds_minor || 0, batch.detected_currency || "GBP")}</span>
+    <span>Transfers ${formatMoney(semantic.transfers_minor || 0, batch.detected_currency || "GBP")}</span>
+    <span>Repayments ${formatMoney(semantic.repayments_minor || 0, batch.detected_currency || "GBP")}</span>`;
+
+  // Amount sign selector: only generic formats may ask the user for semantics
   renderAmountSignSelector(batch);
 
   updateBatchCounts(batch);
@@ -527,6 +570,10 @@ function renderAmountSignSelector(batch) {
   if (!wrap) return;
 
   const candidates = batch.candidates || [];
+  if (batch.adapter_id && batch.adapter_id !== "generic") {
+    wrap.hidden = true;
+    return;
+  }
   // Show selector when all candidates with amounts are positive (unsigned)
   const allPositive = candidates.length > 0 && candidates.every((c) =>
     c.amount_minor === null || c.amount_minor === undefined || c.amount_minor >= 0
@@ -558,6 +605,7 @@ function updateBatchCounts(batch) {
   const candidates = batch.candidates || [];
 
   // Check for blocking errors on included candidates
+  const batchErrors = (batch.issues || []).filter((i) => i.severity === "error");
   const blockingErrors = candidates.filter((c) =>
     c.included && c.issues && c.issues.some((i) => i.severity === "error")
   );
@@ -569,7 +617,10 @@ function updateBatchCounts(batch) {
   const commitBtn = $("commit-batch-btn");
   const noteEl = $("commit-summary-note");
 
-  if (blockingErrors.length > 0) {
+  if (batchErrors.length > 0) {
+    commitBtn.disabled = true;
+    noteEl.textContent = `Blocked: ${batchErrors[0].message}`;
+  } else if (blockingErrors.length > 0) {
     commitBtn.disabled = true;
     const reasons = [...new Set(blockingErrors.flatMap((c) =>
       c.issues.filter((i) => i.severity === "error").map((i) => i.code)

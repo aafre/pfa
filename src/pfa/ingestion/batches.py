@@ -558,7 +558,11 @@ def create_batch(
     service.validate(candidates)
     if batch.amount_sign:
         for candidate in candidates:
-            _apply_amount_sign(candidate, batch.amount_sign)
+            _apply_amount_sign(
+                candidate,
+                batch.amount_sign,
+                amex_card=batch.adapter_id in {"amex_uk_csv", "amex_uk_pdf"},
+            )
     service.resolve_duplicates(candidates)
 
     if not candidates and not any(issue.severity == ERROR for issue in extraction.issues):
@@ -625,7 +629,9 @@ def _resolve_ambiguous_amount(candidate: CandidateTransaction, mode: str) -> Non
     candidate.issues = [issue for issue in candidate.issues if issue.code != AMBIGUOUS_SIGN]
 
 
-def _apply_amount_sign(candidate: CandidateTransaction, convention: str) -> None:
+def _apply_amount_sign(
+    candidate: CandidateTransaction, convention: str, *, amex_card: bool = False
+) -> None:
     """Re-reads a row's flow direction from its single amount column under the statement's
     sign convention. A credit-card export writes a purchase as a positive figure, which
     `as_written` books as income.
@@ -637,6 +643,9 @@ def _apply_amount_sign(candidate: CandidateTransaction, convention: str) -> None
     extractor already resolved it.
     """
     if candidate.direction is None:
+        return
+    if amex_card and "PAYMENT RECEIVED" in candidate.raw_description.upper():
+        candidate.direction = "credit"
         return
     if candidate.direction_explicit:
         return
@@ -724,7 +733,11 @@ def apply_patch(uow: UnitOfWork, batch_id: str, patch: BatchPatch) -> ImportBatc
             # that clears an amount would quietly hand that row back to as_written.
             # Still after validate (which sets direction) and before duplicate
             # resolution, whose fingerprint covers the signed amount.
-            _apply_amount_sign(candidate, batch.amount_sign)
+            _apply_amount_sign(
+                candidate,
+                batch.amount_sign,
+                amex_card=batch.adapter_id in {"amex_uk_csv", "amex_uk_pdf"},
+            )
     service.resolve_duplicates(candidates)
 
     batch.candidates_json = candidates_to_json(candidates)
