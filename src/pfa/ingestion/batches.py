@@ -63,6 +63,7 @@ from .candidates import (
 )
 from .dialects import DIALECTS, Dialect, detect_adapter
 from .extractors.csv import CsvStatementExtractor
+from .extractors.hdfc import HdfcDelimitedExtractor
 from .extractors.ocr import OcrFallbackPdfExtractor
 from .extractors.pdf import clean_amount_text
 
@@ -210,6 +211,11 @@ def _extractor_for(
     account_currency: str = "GBP",
 ) -> StatementExtractor:
     """Picks only the extraction engine; statement semantics come from content detection."""
+    if dialect.adapter_id == "hdfc_in_delimited_v1":
+        return HdfcDelimitedExtractor(
+            max_candidate_rows=settings.max_candidate_rows,
+            dialect=dialect,
+        )
     if source.path.suffix.lower() == ".pdf":
         return OcrFallbackPdfExtractor(
             settings=settings,
@@ -508,14 +514,14 @@ def create_batch(
     if account and selected is None:
         selected = uow.accounts.get_by_name(account)
         destination_account_id = selected.id if selected is not None else None
-    account_currency = (
-        selected.currency
-        if selected is not None
-        else (new_account.currency if new_account else "GBP")
-    )
 
     detection = detect_adapter(source.path, source.media_type)
     dialect = detection.dialect
+    account_currency = (
+        detection.suggested_currency
+        or (selected.currency if selected is not None else None)
+        or (new_account.currency if new_account else "GBP")
+    )
     extractor = _extractor_for(source, settings, dialect, account_currency=account_currency)
 
     batch = ImportBatchModel(
@@ -604,7 +610,13 @@ def create_batch(
         batch.statement_end = max(parsed_dates)
 
     batch.detected_account = extraction.detected_account
-    batch.detected_currency = extraction.detected_currency or account_currency
+    # HDFC's INR is an adapter suggestion, not evidence read from the file. Keep the
+    # detected field empty so the UI must ask for confirmation.
+    batch.detected_currency = (
+        extraction.detected_currency
+        if extraction.detected_currency is not None
+        else (None if detection.suggested_currency else account_currency)
+    )
     batch.detected_institution = extraction.detected_institution or detection.institution
     batch.detected_account_hint = extraction.detected_account_hint or detection.account_hint
     batch.page_count = extraction.page_count
