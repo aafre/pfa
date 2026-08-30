@@ -1,6 +1,7 @@
 """Multipart upload staging: bounded, streamed, and signature-checked.
 
-Accepts CSV and PDF. Never trust the client-supplied filename as a path component;
+Accepts CSV, UTF-8 delimited text, and PDF. Never trust the client-supplied filename as a
+path component;
 the staged name is always generated. The extension decides which signature check runs
 and, downstream, which extractor the batch layer selects.
 """
@@ -99,7 +100,7 @@ def stage_upload(
             raise UploadRejected(INVALID_SIGNATURE, "file is not a valid PDF")
     else:
         try:
-            head.decode("utf-8-sig")
+            staged_path.read_text(encoding="utf-8-sig")
         except UnicodeDecodeError as exc:
             staged_path.unlink(missing_ok=True)
             raise UploadRejected(
@@ -116,7 +117,7 @@ def stage_upload(
                     or "withdrawal amt" in lower
                     or "deposit amt" in lower
                     or "chq./ref.no" in lower
-                    or "value dt" in lower and "closing balance" in lower
+                    or ("value dt" in lower and "closing balance" in lower)
                 )
                 staged_path.unlink(missing_ok=True)
                 if formatted_markers:

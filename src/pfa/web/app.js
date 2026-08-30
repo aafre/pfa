@@ -394,9 +394,27 @@ function setupUploadHandlers() {
     const selected = $("destination-account-select").value;
     const newName = $("new-account-name").value.trim();
     if ((!selected && !newName) || !state.activeBatch) return;
+    const isHdfc = state.activeBatch.adapter_id === "hdfc_in_delimited_v1";
+    const opening = $("new-account-opening-balance")?.value;
     const body = selected
-      ? { destination_account_id: Number(selected) }
-      : { new_account: { name: newName, account_type: $("new-account-type").value, currency: state.activeBatch.detected_currency || "GBP" } };
+      ? {
+          destination_account_id: Number(selected),
+          ...(isHdfc && $("mark-hdfc-account")?.checked
+            ? { account_metadata_update: { institution: "hdfc_bank" } }
+            : {})
+        }
+      : {
+          new_account: {
+            name: newName,
+            account_type: $("new-account-type").value,
+            currency: isHdfc ? "INR" : (state.activeBatch.detected_currency || "GBP"),
+            institution: isHdfc ? "hdfc_bank" : null,
+            currency_confirmed: isHdfc ? $("confirm-account-currency").checked : false,
+            opening_balance_minor: isHdfc && opening ? Math.round(Number(opening) * 100) : 0,
+            opening_balance_as_of: isHdfc ? $("new-account-opening-as-of")?.value || null : null,
+            opening_balance_confirmed: isHdfc ? $("confirm-opening-balance").checked : false
+          }
+        };
     try {
       const patched = await apiRequest(`/imports/${state.activeBatch.id}`, {
         method: "PATCH",
@@ -404,7 +422,8 @@ function setupUploadHandlers() {
         body: JSON.stringify(body)
       });
       state.activeBatch = patched;
-      showToast(`Assigned account "${acc}" to statement batch.`);
+      renderBatchInspector(patched);
+      showToast(`Assigned ${selected ? "the selected account" : `account "${newName}"`} to statement batch.`);
     } catch (err) {
       showToast(err.message, true);
     }
@@ -430,6 +449,7 @@ function setupUploadHandlers() {
     if (!state.activeBatch) return;
     try {
       const committed = await apiRequest(`/imports/${state.activeBatch.id}/commit`, { method: "POST" });
+      state.activeBatch = committed;
       $("batch-inspector").hidden = true;
       $("batch-success-card").hidden = false;
       $("nav-import-status").hidden = true;
@@ -533,24 +553,31 @@ async function handleStatementUpload(file) {
 
 function renderBatchInspector(batch) {
   $("batch-filename").textContent = batch.original_filename;
-  $("batch-extractor").textContent = batch.extractor || "auto";
-  $("batch-currency").textContent = batch.detected_currency || "GBP";
+  const isHdfc = batch.adapter_id === "hdfc_in_delimited_v1";
+  $("batch-extractor").textContent = isHdfc
+    ? "HDFC Bank · Delimited · High confidence"
+    : batch.extractor || "auto";
+  const currency = batch.detected_currency || batch.suggested_currency || "GBP";
+  $("batch-currency").textContent = isHdfc ? `${currency} — confirm` : currency;
   $("batch-pages").textContent = batch.page_count || "1";
   $("batch-period").textContent = batch.statement_start && batch.statement_end ? `${batch.statement_start} to ${batch.statement_end}` : "Auto-detected";
 
   $("destination-account-select").value = batch.destination_account_id ? String(batch.destination_account_id) : "";
   $("new-account-name").value = batch.new_account?.name || "";
-  $("new-account-type").value = batch.new_account?.account_type || "current";
+  $("new-account-type").value = batch.new_account?.account_type || (isHdfc ? "current" : "current");
+  renderHdfcBinding(batch);
 
   const semantic = batch.semantic_totals || {};
   $("batch-semantic-summary").innerHTML = `
     <strong>Import effect</strong>
-    <span>Money in ${formatMoney(semantic.money_in_minor || 0, batch.detected_currency || "GBP")}</span>
-    <span>Spending ${formatMoney(semantic.spending_minor || 0, batch.detected_currency || "GBP")}</span>
-    <span>Refunds ${formatMoney(semantic.refunds_minor || 0, batch.detected_currency || "GBP")}</span>
-    <span>Transfers ${formatMoney(semantic.transfers_minor || 0, batch.detected_currency || "GBP")}</span>
-    <span>Repayments ${formatMoney(semantic.repayments_minor || 0, batch.detected_currency || "GBP")}</span>`;
+    <span>${semantic.money_out_count || 0} money out · ${formatMoney(semantic.money_out_minor || 0, currency)}</span>
+    <span>${semantic.money_in_count || 0} money in · ${formatMoney(semantic.money_in_minor || 0, currency)}</span>
+    <span>Spending ${formatMoney(semantic.spending_minor || 0, currency)}</span>
+    <span>Refunds ${formatMoney(semantic.refunds_minor || 0, currency)}</span>
+    <span>Transfers ${formatMoney(semantic.transfers_minor || 0, currency)}</span>
+    <span>Repayments ${formatMoney(semantic.repayments_minor || 0, currency)}</span>`;
 
+  renderReconciliation(batch);
   // Amount sign selector: only generic formats may ask the user for semantics
   renderAmountSignSelector(batch);
 
@@ -559,10 +586,67 @@ function renderBatchInspector(batch) {
 
   if (batch.issues && batch.issues.length > 0) {
     $("batch-issues-alert").hidden = false;
-    $("batch-issues-content").innerHTML = batch.issues.map((i) => `<div><strong>${escapeHtml(i.code)}:</strong> ${escapeHtml(i.message)}</div>`).join("");
+    $("batch-issues-content").innerHTML = batch.issues.map((i) => `<div><strong>${escapeHtml(issueLabel(i))}:</strong> ${escapeHtml(i.message)}</div>`).join("");
   } else {
     $("batch-issues-alert").hidden = true;
   }
+}
+
+function renderHdfcBinding(batch) {
+  const isHdfc = batch.adapter_id === "hdfc_in_delimited_v1";
+  const fields = $("hdfc-account-fields");
+  const correction = $("hdfc-legacy-correction");
+  if (!fields || !correction) return;
+  fields.hidden = !isHdfc;
+  correction.hidden = !isHdfc || !batch.destination_account_id ||
+    Boolean(state.accounts.find((account) => account.id === batch.destination_account_id)?.institution);
+  if (!isHdfc) return;
+
+  $("new-account-currency").value = batch.suggested_currency || "INR";
+  $("new-account-institution").value = "hdfc_bank";
+  const draft = batch.new_account || {};
+  $("confirm-account-currency").checked = Boolean(draft.currency_confirmed);
+  $("confirm-opening-balance").checked = Boolean(draft.opening_balance_confirmed);
+  $("mark-hdfc-account").checked = false;
+  const suggestion = batch.reconciliation?.opening_balance_suggestion;
+  if (suggestion && !batch.new_account) {
+    $("new-account-opening-balance").value = (Number(suggestion.balance_minor) / 100).toFixed(2);
+    $("new-account-opening-as-of").value = suggestion.as_of || "";
+  } else {
+    $("new-account-opening-balance").value = draft.opening_balance_minor === undefined ? "" : (Number(draft.opening_balance_minor) / 100).toFixed(2);
+    $("new-account-opening-as-of").value = draft.opening_balance_as_of || "";
+  }
+  const type = $("new-account-type");
+  if (type) {
+    type.innerHTML = `<option value="current">Current account</option><option value="savings">Savings</option>`;
+    type.value = draft.account_type || type.value || "current";
+  }
+}
+
+function renderReconciliation(batch) {
+  const target = $("batch-reconciliation");
+  const result = batch.reconciliation;
+  if (!target || !result) return;
+  const status = result.status || "not available";
+  const evidence = result.evidence || "No balance evidence available";
+  const transitions = result.checked_transition_count === undefined ? "" : ` · ${result.checked_transition_count} transitions checked`;
+  target.innerHTML = `<strong>Reconciliation: ${escapeHtml(status)}</strong><span>${escapeHtml(evidence)}${escapeHtml(transitions)}</span>`;
+}
+
+function issueLabel(issue) {
+  const labels = {
+    ACCOUNT_REQUIRED: "Choose a compatible account",
+    ACCOUNT_TYPE_MISMATCH: "Account type does not match",
+    ACCOUNT_CURRENCY_MISMATCH: "Currency confirmation needed",
+    ACCOUNT_INSTITUTION_REQUIRED: "Confirm this account belongs to HDFC Bank",
+    ACCOUNT_INSTITUTION_MISMATCH: "The selected account belongs to another institution",
+    BALANCE_RECONCILIATION_FAILED: "Statement balance check failed",
+    RECONCILIATION_INCOMPLETE: "All statement rows must be included",
+    HDFC_AMOUNT_SIDES_INVALID: "Each row needs one money-out or money-in amount",
+    HDFC_ROW_WIDTH_INVALID: "A statement row has the wrong number of columns",
+    UNSUPPORTED_TEXT_LAYOUT: "Choose HDFC Delimited when downloading"
+  };
+  return labels[issue.code] || issue.code;
 }
 
 function renderAmountSignSelector(batch) {
@@ -602,6 +686,7 @@ function updateBatchCounts(batch) {
   $("count-excluded").textContent = batch.counts.excluded || 0;
 
   const validToCommit = (batch.counts.valid || 0);
+  const duplicateOnlyCommit = (batch.counts.duplicate || 0) > 0 && batch.reconciliation?.status === "reconciled";
   const candidates = batch.candidates || [];
 
   // Check for blocking errors on included candidates
@@ -629,7 +714,7 @@ function updateBatchCounts(batch) {
   } else if (needsSign) {
     commitBtn.disabled = true;
     noteEl.textContent = "Set the amount sign convention before committing";
-  } else if (validToCommit === 0) {
+  } else if (validToCommit === 0 && !duplicateOnlyCommit) {
     commitBtn.disabled = true;
     noteEl.textContent = "No valid transactions to commit";
   } else {
@@ -662,7 +747,7 @@ function renderCandidatesTable() {
     const isDebit = c.direction === "debit";
     const amountStr = formatMoney(c.amount_minor, c.currency);
     const issues = c.issues || [];
-    const issueHtml = issues.map((i) => `<span class="issue-badge issue-${i.severity === 'error' ? 'error' : 'warning'}" title="${escapeHtml(i.message)}">${escapeHtml(i.code)}</span>`).join(" ");
+    const issueHtml = issues.map((i) => `<span class="issue-badge issue-${i.severity === 'error' ? 'error' : 'warning'}" title="${escapeHtml(i.message)}">${escapeHtml(issueLabel(i))}</span>`).join(" ");
     const dupHtml = c.duplicate_of ? `<span class="issue-badge issue-duplicate">Duplicate of #${c.duplicate_of}</span>` : "";
 
     return `
@@ -680,7 +765,7 @@ function renderCandidatesTable() {
           ${isDebit ? `−${amountStr}` : `+${amountStr}`}
         </td>
         <td>
-          <span class="meta-chip">${escapeHtml(c.extraction_method || "table")}</span>
+          <span class="meta-chip">${escapeHtml(c.extraction_method === "hdfc_in_delimited_v1" ? "Delimited" : c.extraction_method || "table")}</span>
           ${issueHtml}
           ${dupHtml}
         </td>

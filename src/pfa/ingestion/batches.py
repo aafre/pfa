@@ -92,6 +92,7 @@ class NewAccountDraft:
     opening_balance_minor: int = 0
     opening_balance_as_of: date | None = None
     opening_balance_confirmed: bool = False
+    currency_confirmed: bool = False
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -105,6 +106,7 @@ class NewAccountDraft:
             if self.opening_balance_as_of
             else None,
             "opening_balance_confirmed": self.opening_balance_confirmed,
+            "currency_confirmed": self.currency_confirmed,
         }
 
     @classmethod
@@ -120,6 +122,7 @@ class NewAccountDraft:
             opening_balance_minor=int(str(opening)),
             opening_balance_as_of=date.fromisoformat(str(as_of)) if as_of else None,
             opening_balance_confirmed=bool(value.get("opening_balance_confirmed", False)),
+            currency_confirmed=bool(value.get("currency_confirmed", False)),
         )
 
 
@@ -404,13 +407,20 @@ def _binding_issues(
                         f"this statement suggests {expected_currency}; confirm that currency",
                     )
                 )
+            if expected_currency and not draft.currency_confirmed:
+                issues.append(
+                    CandidateIssue(
+                        INVALID_ACCOUNT_DRAFT,
+                        f"confirm {expected_currency} as the account currency before importing",
+                    )
+                )
             if dialect.institution and _institution_key(draft.institution) != _institution_key(
                 dialect.institution
             ):
                 issues.append(
                     CandidateIssue(
                         ACCOUNT_INSTITUTION_MISMATCH,
-                        "this statement must be bound to HDFC Bank",
+                        "new account institution does not match the statement",
                     )
                 )
             if draft.last4 is not None and (len(draft.last4) != 4 or not draft.last4.isdigit()):
@@ -488,7 +498,8 @@ def _binding_issues(
                 issues.append(
                     CandidateIssue(
                         ACCOUNT_INSTITUTION_REQUIRED,
-                        "confirm that this legacy account is HDFC Bank before importing",
+                        "confirm that the selected legacy account belongs to the "
+                        "statement institution",
                     )
                 )
             elif _institution_key(account.institution) != _institution_key(dialect.institution):

@@ -98,6 +98,7 @@ class NewAccountRequest(BaseModel):
     opening_balance_minor: int = 0
     opening_balance_as_of: date | None = None
     opening_balance_confirmed: bool = False
+    currency_confirmed: bool = False
 
 
 class AccountMetadataUpdateRequest(BaseModel):
