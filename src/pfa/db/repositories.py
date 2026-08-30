@@ -245,6 +245,15 @@ class TransferRepository:
     def delete_event(self, event_id: int) -> None:
         event = self.session.get(TransferEventModel, event_id)
         if event is not None:
+            now = datetime.now(UTC).replace(tzinfo=None)
+            for decision in self.session.scalars(
+                select(TransferMatchDecisionModel).where(
+                    TransferMatchDecisionModel.event_id == event_id
+                )
+            ):
+                decision.state = "dismissed"
+                decision.event_id = None
+                decision.reviewed_at = now
             self.session.delete(event)
             self.session.flush()
 

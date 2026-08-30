@@ -234,6 +234,9 @@ def create_manual_link(
         raise BatchError(
             "TRANSFER_SAME_ACCOUNT", "transfer legs must belong to different accounts", 422
         )
+    accounts = {account.id: account for account in uow.accounts.all()}
+    if any(not accounts[account_id].active for account_id in account_ids if account_id in accounts):
+        raise BatchError("TRANSFER_ACCOUNT_INACTIVE", "all transfer accounts must be active", 422)
     source_id = next(transaction_id for transaction_id, role in legs if role == "source")
     destination_id = next(transaction_id for transaction_id, role in legs if role == "destination")
     if (
@@ -249,6 +252,13 @@ def create_manual_link(
     ):
         raise BatchError("TRANSFER_SIGN_INVALID", "the destination leg must be money in", 422)
     event = TransferEventModel(purpose=purpose, match_method="manual")
+    for transaction_id, _role in legs:
+        transaction = transactions[transaction_id]
+        transaction.kind = TransactionKind.TRANSFER.value
+        transaction.transfer_purpose = purpose
+        transaction.category = None
+        transaction.classification_source = "user"
+        transaction.classification_reason = "explicit transfer link"
     uow.transfers.add_event(
         event,
         [
