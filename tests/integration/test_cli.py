@@ -1,6 +1,19 @@
+import pytest
 from typer.testing import CliRunner
 
 from pfa.cli.app import app
+from pfa.config import get_settings
+
+
+@pytest.fixture(autouse=True)
+def _reset_settings_cache():
+    """get_settings() is process-wide @lru_cache'd. A test that points PFA_DATABASE_URL
+    at a tmp_path DB must not inherit a stale cached Settings from an earlier test in this
+    file, nor leak its own tmp_path-scoped Settings into whatever runs after it.
+    """
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def test_cli_missing_import_file_is_a_clean_usage_error(tmp_path) -> None:
