@@ -60,6 +60,14 @@ BATCH_EXPIRED = "BATCH_EXPIRED"
 BATCH_NOT_EDITABLE = "BATCH_NOT_EDITABLE"
 BATCH_HAS_BLOCKING_ERRORS = "BATCH_HAS_BLOCKING_ERRORS"
 BATCH_ALREADY_COMMITTED = "BATCH_ALREADY_COMMITTED"
+ACCOUNT_NOT_FOUND = "ACCOUNT_NOT_FOUND"
+ACCOUNT_INACTIVE = "ACCOUNT_INACTIVE"
+ACCOUNT_TYPE_MISMATCH = "ACCOUNT_TYPE_MISMATCH"
+ACCOUNT_CURRENCY_MISMATCH = "ACCOUNT_CURRENCY_MISMATCH"
+ACCOUNT_REQUIRED = "ACCOUNT_REQUIRED"
+INVALID_ACCOUNT_DRAFT = "INVALID_ACCOUNT_DRAFT"
+GENERIC_SIGN_CONFIRMATION_REQUIRED = "GENERIC_SIGN_CONFIRMATION_REQUIRED"
+UNDO_REQUIRES_CONFIRMATION = "UNDO_REQUIRES_CONFIRMATION"
 
 
 # One header vocabulary for every extractor. A bank's wording is added once, here, rather
@@ -67,6 +75,7 @@ BATCH_ALREADY_COMMITTED = "BATCH_ALREADY_COMMITTED"
 # lowercased and whitespace-collapsed - the spec forbids fuzzy guessing.
 HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "date": ("date", "transaction date", "transaction_date"),
+    "posted_date": ("posted date", "posted_date", "posting date", "posting_date"),
     "description": ("description", "details", "narrative", "merchant"),
     "debit": ("debit", "paid out", "paid_out", "withdrawn", "money out", "money_out"),
     "credit": ("credit", "paid in", "paid_in", "received", "money in", "money_in"),
@@ -224,6 +233,7 @@ class CandidateTransaction:
     direction_explicit: bool = False
     currency: str = "GBP"
     account_hint: str | None = None
+    account_id: int | None = None
     external_id: str | None = None
     kind: str | None = None
     category: str | None = None
@@ -251,6 +261,10 @@ class CandidateTransaction:
             return None
         return -self.amount_minor if self.direction == "debit" else self.amount_minor
 
+    @property
+    def signed_minor(self) -> int | None:
+        return self.signed_amount_minor
+
     def add_issue(self, code: str, message: str, severity: str = ERROR) -> None:
         self.issues.append(CandidateIssue(code, message, severity))
 
@@ -265,6 +279,9 @@ class ExtractionResult:
     page_count: int | None = None
     detected_account: str | None = None
     detected_currency: str | None = None
+    detected_institution: str | None = None
+    detected_account_hint: str | None = None
+    statement_year: int | None = None
     issues: list[CandidateIssue] = field(default_factory=list)
 
 

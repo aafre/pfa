@@ -23,10 +23,13 @@ class Base(DeclarativeBase):
 class AccountModel(Base):
     __tablename__ = "accounts"
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(120), unique=True)
+    name: Mapped[str] = mapped_column(String(120))
     account_type: Mapped[str] = mapped_column(String(30), default="current")
     currency: Mapped[str] = mapped_column(String(3), default="GBP")
+    institution: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    last4: Mapped[str | None] = mapped_column(String(4), nullable=True)
     opening_balance_minor: Mapped[int] = mapped_column(Integer, default=0)
+    opening_balance_as_of: Mapped[date | None] = mapped_column(Date, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     transactions: Mapped[list[TransactionModel]] = relationship(back_populates="account")
 
@@ -97,6 +100,16 @@ class ImportBatchModel(Base):
     extractor: Mapped[str] = mapped_column(String(60))
     status: Mapped[str] = mapped_column(String(20), index=True)
     destination_account: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    destination_account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("accounts.id"), nullable=True, index=True
+    )
+    new_account_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    adapter_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    detection_confidence: Mapped[float | None] = mapped_column(nullable=True)
+    detection_reason_codes_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    detected_institution: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    detected_account_hint: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    reconciliation_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The sign convention the user declared for this source, kept so the preview can be
     # rebuilt after a refresh and so a committed batch records how it read its amounts.
     amount_sign: Mapped[str | None] = mapped_column(String(20), nullable=True)

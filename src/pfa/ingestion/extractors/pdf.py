@@ -8,6 +8,7 @@ is the first caller and will reach the renderer only through pdfplumber.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
@@ -85,10 +86,14 @@ class _RawRow:
 
 def _table_header(table: list[list[str | None]]) -> dict[int, str] | None:
     mapping: dict[int, str] = {}
+    seen: set[str] = set()
     for index, cell in enumerate(table[0]):
         matched = match_header_alias(cell or "")
+        if matched == "date" and matched in seen:
+            matched = "posted_date"
         if matched:
             mapping[index] = matched
+            seen.add(matched)
     return mapping if _has_transaction_header_fields(set(mapping.values())) else None
 
 
@@ -148,7 +153,15 @@ def _split_cells(line_words: list[Word]) -> list[tuple[float, str, float | None]
 def _header_columns(
     cells: list[tuple[float, str, float | None]],
 ) -> list[tuple[float, str]] | None:
-    columns = [(x0, matched) for x0, text, _ in cells if (matched := match_header_alias(text))]
+    seen: set[str] = set()
+    columns: list[tuple[float, str]] = []
+    for x0, text, _ in cells:
+        matched = match_header_alias(text)
+        if matched == "date" and matched in seen:
+            matched = "posted_date"
+        if matched:
+            columns.append((x0, matched))
+            seen.add(matched)
     names = {name for _, name in columns}
     if not _has_transaction_header_fields(names):
         return None
@@ -465,6 +478,38 @@ def _resolve_amount(
     return _AmountResult()
 
 
+_BALANCE_MARKERS = (
+    "BALANCEBROUGHTFORWARD",
+    "BALANCE BROUGHT FORWARD",
+    "BALANCECARRIEDFORWARD",
+    "BALANCE CARRIED FORWARD",
+    "OPENING BALANCE",
+    "CLOSING BALANCE",
+)
+_DATE_WITH_YEAR = re.compile(
+    r"(?:\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|"
+    r"\b\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4}\b|"
+    r"\b[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{2,4}\b)"
+)
+
+
+def _statement_year(pdf: PDF) -> int | None:
+    for page in pdf.pages[:3]:
+        match = _DATE_WITH_YEAR.search(page.extract_text() or "")
+        if match:
+            year_match = re.search(r"\d{2,4}$", match.group())
+            if year_match:
+                year = int(year_match.group())
+                return year + 2000 if year < 100 else year
+    return None
+
+
+def _is_balance_marker(row: _RawRow) -> bool:
+    description = " ".join(row.fields.get("description", "").upper().split())
+    compact = description.replace(" ", "")
+    return any(marker in description or marker in compact for marker in _BALANCE_MARKERS)
+
+
 def _build_candidate(
     index: int,
     row: _RawRow,
@@ -478,6 +523,7 @@ def _build_candidate(
     candidate = CandidateTransaction(
         candidate_id=f"p{index}",
         transaction_date=fields.get("date", "").strip() or None,
+        posted_date=fields.get("posted_date", "").strip() or None,
         raw_description=fields.get("description", "").strip(),
         currency=currency.upper(),
         external_id=fields.get("reference", "").strip() or None,
@@ -569,6 +615,7 @@ class PdfStatementExtractor:
 
     def _extract(self, pdf: PDF, result: ExtractionResult) -> ExtractionResult:
         result.page_count = len(pdf.pages)
+        result.statement_year = _statement_year(pdf)
         if result.page_count > self._max_pages:
             result.issues.append(
                 CandidateIssue(
@@ -583,9 +630,10 @@ class PdfStatementExtractor:
             page_rows, header_top = self._page_rows(page)
             kept.extend(_merge_continuations(page_rows, header_top, self.dialect))
 
+        transaction_rows = [row for row in kept if not _is_balance_marker(row)]
         candidates = [
             _build_candidate(index, row, self._ocr_min_confidence, self.currency, self.dialect)
-            for index, row in enumerate(kept, start=1)
+            for index, row in enumerate(transaction_rows, start=1)
         ]
         if len(candidates) > self._max_rows:
             candidates = candidates[: self._max_rows]

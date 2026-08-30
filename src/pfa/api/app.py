@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import date, datetime
@@ -8,7 +9,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_ai import UsageLimits
 from starlette.requests import Request
 from starlette.responses import Response
@@ -21,14 +22,17 @@ from pfa.ai.models import available_models
 from pfa.ai.schemas import ChatRequest, ImportRequest
 from pfa.config import Settings, get_settings
 from pfa.db.models import ImportBatchModel
+from pfa.domain.accounts import AccountType
 from pfa.domain.errors import BatchError, UploadRejected
 from pfa.ingestion.batches import (
     BatchPatch,
+    NewAccountDraft,
     apply_patch,
     batch_candidates,
     batch_committed_transaction_ids,
     batch_counts,
     batch_issues,
+    batch_semantic_totals,
     commit_batch,
     create_batch,
     discard_batch,
@@ -64,6 +68,21 @@ class AccountResponse(BaseModel):
     name: str
     account_type: str
     currency: str
+    institution: str | None = None
+    last4: str | None = None
+    opening_balance_minor: int = 0
+    opening_balance_as_of: date | None = None
+    active: bool = True
+
+
+class NewAccountRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    account_type: AccountType = AccountType.CURRENT
+    currency: str = Field(default="GBP", min_length=3, max_length=3)
+    institution: str | None = Field(default=None, max_length=120)
+    last4: str | None = Field(default=None, min_length=4, max_length=4, pattern=r"^\\d{4}$")
+    opening_balance_minor: int = 0
+    opening_balance_as_of: date | None = None
 
 
 class CandidateIssueResponse(BaseModel):
@@ -82,6 +101,8 @@ class CandidateResponse(BaseModel):
     direction: str | None
     currency: str
     account_hint: str | None
+    account_id: int | None
+    signed_amount_minor: int | None
     external_id: str | None
     kind: str | None
     category: str | None
@@ -106,6 +127,15 @@ class ImportBatchResponse(BaseModel):
     sha256: str
     extractor: str
     destination_account: str | None
+    destination_account_id: int | None
+    new_account: NewAccountRequest | None
+    adapter_id: str | None
+    detection_confidence: float | None
+    detection_reason_codes: list[str]
+    detected_institution: str | None
+    detected_account_hint: str | None
+    reconciliation: dict[str, object] | None
+    semantic_totals: dict[str, int]
     amount_sign: str | None
     detected_account: str | None
     detected_currency: str | None
@@ -123,8 +153,21 @@ class ImportBatchResponse(BaseModel):
 
 
 class ImportBatchPatchRequest(BaseModel):
-    account: str | None = None
+    account: str | None = None  # deprecated label compatibility
+    destination_account_id: int | None = Field(default=None, gt=0)
+    new_account: NewAccountRequest | None = None
     excluded_candidate_ids: list[str] | None = None
+
+    @model_validator(mode="after")
+    def one_binding(self) -> ImportBatchPatchRequest:
+        if self.destination_account_id is not None and self.new_account is not None:
+            raise ValueError("choose destination_account_id or new_account, not both")
+        if self.account is not None and (
+            self.destination_account_id is not None or self.new_account is not None
+        ):
+            raise ValueError("account is a legacy alias; use one stable binding")
+        return self
+
     # Both are closed sets: an unrecognised value is a 422, not a silent no-op.
     amount_mode: Literal["debit", "credit"] | None = None
     amount_sign: Literal["as_written", "debit_positive"] | None = None
@@ -173,6 +216,8 @@ def _candidate_response(candidate: CandidateTransaction) -> CandidateResponse:
         direction=candidate.direction,
         currency=candidate.currency,
         account_hint=candidate.account_hint,
+        account_id=candidate.account_id,
+        signed_amount_minor=candidate.signed_amount_minor,
         external_id=candidate.external_id,
         kind=candidate.kind,
         category=candidate.category,
@@ -199,6 +244,25 @@ def _batch_response(batch: ImportBatchModel) -> ImportBatchResponse:
         sha256=batch.sha256,
         extractor=batch.extractor,
         destination_account=batch.destination_account,
+        destination_account_id=batch.destination_account_id,
+        new_account=(
+            NewAccountRequest(**json.loads(batch.new_account_json))
+            if batch.new_account_json
+            else None
+        ),
+        adapter_id=batch.adapter_id,
+        detection_confidence=batch.detection_confidence,
+        detection_reason_codes=(
+            json.loads(batch.detection_reason_codes_json)
+            if batch.detection_reason_codes_json
+            else []
+        ),
+        detected_institution=batch.detected_institution,
+        detected_account_hint=batch.detected_account_hint,
+        reconciliation=(
+            json.loads(batch.reconciliation_json) if batch.reconciliation_json else None
+        ),
+        semantic_totals=batch_semantic_totals(batch),
         amount_sign=batch.amount_sign,
         detected_account=batch.detected_account,
         detected_currency=batch.detected_currency,
@@ -284,6 +348,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request,
         file: UploadFile = File(...),  # noqa: B008 - FastAPI's dependency-injection idiom
         account: str | None = Form(None),  # noqa: B008
+        destination_account_id: int | None = Form(None),  # noqa: B008
+        new_account_name: str | None = Form(None),  # noqa: B008
+        new_account_type: AccountType = Form(AccountType.CURRENT),  # noqa: B008
+        new_account_currency: str = Form("GBP"),  # noqa: B008
     ) -> ImportBatchResponse:
         content_length = request.headers.get("content-length")
         # A header the client controls must not be able to turn a bad request into a 500;
@@ -300,7 +368,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             engine, services = open_services(active_settings)
             try:
-                batch = create_batch(services.uow, source, active_settings, account=account)
+                draft = (
+                    NewAccountRequest(
+                        name=new_account_name,
+                        account_type=new_account_type,
+                        currency=new_account_currency,
+                    )
+                    if new_account_name
+                    else None
+                )
+                batch = create_batch(
+                    services.uow,
+                    source,
+                    active_settings,
+                    account=account,
+                    destination_account_id=destination_account_id,
+                    new_account=NewAccountDraft(**draft.model_dump()) if draft else None,
+                )
                 response = _batch_response(batch)
                 close_services(engine, services)
                 return response
@@ -341,6 +425,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 batch_id,
                 BatchPatch(
                     account=request.account,
+                    destination_account_id=request.destination_account_id,
+                    new_account=(
+                        NewAccountDraft(**request.new_account.model_dump())
+                        if request.new_account
+                        else None
+                    ),
                     excluded_candidate_ids=request.excluded_candidate_ids,
                     amount_mode=request.amount_mode,
                     amount_sign=request.amount_sign,
@@ -398,7 +488,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             return [
                 AccountResponse(
-                    id=acc.id, name=acc.name, account_type=acc.account_type, currency=acc.currency
+                    id=acc.id,
+                    name=acc.name,
+                    account_type=acc.account_type,
+                    currency=acc.currency,
+                    institution=acc.institution,
+                    last4=acc.last4,
+                    opening_balance_minor=acc.opening_balance_minor,
+                    opening_balance_as_of=acc.opening_balance_as_of,
+                    active=acc.active,
                 )
                 for acc in services.uow.accounts.all()
             ]

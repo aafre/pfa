@@ -42,4 +42,10 @@ class ClassificationSource(StrEnum):
 class TransferPurpose(StrEnum):
     SAVING = "saving"
     INVESTMENT = "investment"
+    CREDIT_CARD_PAYMENT = "credit_card_payment"
     OTHER = "other"
+
+
+def signed_minor(amount_minor: int, flow_direction: str) -> int:
+    """Return PFA's canonical money-in/money-out polarity from legacy storage."""
+    return amount_minor if flow_direction == "credit" else -amount_minor

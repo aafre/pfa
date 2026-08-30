@@ -100,9 +100,12 @@ def read_csv_rows(
             row = {str(key).strip().lower(): (value or "") for key, value in raw.items()}
             yield {
                 "date": _value(row, *DATE_ALIASES),
-                "posted_date": _value(row, "posted_date", "posted date"),
+                "posted_date": _value(
+                    row, "posted_date", "posted date", "posting date", "posting_date"
+                ),
                 "description": _value(row, *DESCRIPTION_ALIASES),
                 "amount": _value(row, *AMOUNT_ALIASES),
+                "balance": _value(row, "balance"),
                 "debit": _value(row, *DEBIT_ALIASES),
                 "credit": _value(row, *CREDIT_ALIASES),
                 "currency": _value(row, "currency") or default_currency or "GBP",
