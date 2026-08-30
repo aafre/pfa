@@ -51,3 +51,45 @@ def test_dashboard_and_static_assets_are_served(tmp_path) -> None:
         js_resp = client.get("/static/app.js")
         assert js_resp.status_code == 200
         assert "javascript" in js_resp.headers.get("content-type", "")
+
+
+def test_api_fx_rates_endpoints(tmp_path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'pfa.db'}"
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "head")
+    app = create_app(Settings(database_url=database_url))
+    with TestClient(app) as client:
+        # Set manual rate
+        post_resp = client.post(
+            "/fx/rates",
+            json={
+                "base_currency": "GBP",
+                "quote_currency": "INR",
+                "rate": "105.5",
+                "effective_at": "2026-08-01",
+            },
+        )
+        assert post_resp.status_code == 200
+        data = post_resp.json()
+        assert data["base_currency"] == "GBP"
+        assert data["quote_currency"] == "INR"
+        assert data["rate"] == "105.5"
+
+        bad_resp = client.post(
+            "/fx/rates",
+            json={
+                "base_currency": "GBP",
+                "quote_currency": "USD",
+                "rate": "not-a-number",
+                "effective_at": "2026-08-01",
+            },
+        )
+        assert bad_resp.status_code == 422
+
+        # Get rates
+        get_resp = client.get("/fx/rates?base=GBP")
+        assert get_resp.status_code == 200
+        rates = get_resp.json()
+        assert len(rates) == 1
+        assert rates[0]["quote_currency"] == "INR"

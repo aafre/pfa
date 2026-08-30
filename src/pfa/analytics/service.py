@@ -70,9 +70,17 @@ class AnalyticsService:
         self.budgets = budgets
         self.goals = goals
 
-    def monthly_summary(self, period: date) -> MonthlySummary:
+    def _filter_currency(
+        self, transactions: list[TransactionModel], currency: str
+    ) -> list[TransactionModel]:
+        curr = currency.upper()
+        return [t for t in transactions if (getattr(t, "currency", None) or "GBP").upper() == curr]
+
+    def monthly_summary(self, period: date, currency: str = "GBP") -> MonthlySummary:
         start, end = month_bounds(period)
-        rows = self.transactions.between(start, end)
+        all_rows = self.transactions.between(start, end)
+        curr = currency.upper()
+        rows = self._filter_currency(all_rows, curr)
         income = sum(row.amount_minor for row in rows if row.kind == TransactionKind.INCOME.value)
         spending = sum(_spending(row) for row in rows)
         essential = sum(_spending(row) for row in rows if row.category in _ESSENTIAL)
@@ -102,6 +110,7 @@ class AnalyticsService:
         )
         return MonthlySummary(
             period=start.strftime("%Y-%m"),
+            currency=curr,
             income_minor=income,
             spending_minor=spending,
             essential_spending_minor=essential,
@@ -114,8 +123,9 @@ class AnalyticsService:
             transaction_count=len(rows),
         )
 
-    def category_spending(self, period: date) -> list[CategoryTotal]:
-        rows = self.transactions.between(*month_bounds(period))
+    def category_spending(self, period: date, currency: str = "GBP") -> list[CategoryTotal]:
+        all_rows = self.transactions.between(*month_bounds(period))
+        rows = self._filter_currency(all_rows, currency)
         totals: dict[str, list[int]] = defaultdict(lambda: [0, 0])
         for row in rows:
             value = _spending(row)
@@ -127,8 +137,9 @@ class AnalyticsService:
             for key, value in sorted(totals.items(), key=lambda item: -item[1][0])
         ]
 
-    def merchant_spending(self, period: date) -> list[MerchantTotal]:
-        rows = self.transactions.between(*month_bounds(period))
+    def merchant_spending(self, period: date, currency: str = "GBP") -> list[MerchantTotal]:
+        all_rows = self.transactions.between(*month_bounds(period))
+        rows = self._filter_currency(all_rows, currency)
         totals: dict[str, list[int]] = defaultdict(lambda: [0, 0])
         for row in rows:
             value = _spending(row)
@@ -140,10 +151,12 @@ class AnalyticsService:
             for key, value in sorted(totals.items(), key=lambda item: -item[1][0])
         ]
 
-    def compare_periods(self, current: date, previous: date | None = None) -> PeriodComparison:
+    def compare_periods(
+        self, current: date, previous: date | None = None, currency: str = "GBP"
+    ) -> PeriodComparison:
         previous = previous or (current.replace(day=1) - timedelta(days=1))
-        current_summary = self.monthly_summary(current)
-        previous_summary = self.monthly_summary(previous)
+        current_summary = self.monthly_summary(current, currency=currency)
+        previous_summary = self.monthly_summary(previous, currency=currency)
         fields = (
             "income_minor",
             "spending_minor",
@@ -159,19 +172,31 @@ class AnalyticsService:
             current=current_summary, previous=previous_summary, changes_minor=changes
         )
 
-    def largest_transactions(self, period: date, limit: int = 10) -> list[TransactionModel]:
-        rows = self.transactions.between(*month_bounds(period))
+    def largest_transactions(
+        self, period: date, limit: int = 10, currency: str = "GBP"
+    ) -> list[TransactionModel]:
+        all_rows = self.transactions.between(*month_bounds(period))
+        rows = self._filter_currency(all_rows, currency)
         return sorted(rows, key=lambda row: _spending(row), reverse=True)[:limit]
 
-    def recurring_payments(self) -> list[dict[str, object]]:
-        return detect_recurring(self.transactions.all())
+    def recurring_payments(self, currency: str = "GBP") -> list[dict[str, object]]:
+        all_rows = self.transactions.all()
+        rows = self._filter_currency(all_rows, currency)
+        return detect_recurring(rows)
 
-    def budget_status(self, period: date) -> list[BudgetStatus]:
+    def budget_status(self, period: date, currency: str = "GBP") -> list[BudgetStatus]:
+        curr = currency.upper()
         actual_by_category = {
-            item.category: item.total_minor for item in self.category_spending(period)
+            item.category: item.total_minor
+            for item in self.category_spending(period, currency=curr)
         }
         statuses = []
-        for budget in self.budgets.active_on(month_bounds(period)[0]):
+        active_budgets = [
+            b
+            for b in self.budgets.active_on(month_bounds(period)[0])
+            if (getattr(b, "currency", None) or "GBP").upper() == curr
+        ]
+        for budget in active_budgets:
             actual = (
                 sum(actual_by_category.values())
                 if budget.category is None
@@ -207,38 +232,53 @@ class AnalyticsService:
             for goal in self.goals.active()
         ]
 
-    def cashflow(self, period: date) -> dict[str, int | str]:
-        summary = self.monthly_summary(period)
+    def cashflow(self, period: date, currency: str = "GBP") -> dict[str, int | str]:
+        summary = self.monthly_summary(period, currency=currency)
         return {
             "period": summary.period,
+            "currency": summary.currency,
             "income_minor": summary.income_minor,
             "spending_minor": summary.spending_minor,
             "net_cashflow_minor": summary.net_cashflow_minor,
         }
 
-    def unusual_transactions(self, period: date) -> list[dict[str, object]]:
-        return unusual_transactions(self.transactions.all(), period)
+    def unusual_transactions(self, period: date, currency: str = "GBP") -> list[dict[str, object]]:
+        all_rows = self.transactions.all()
+        rows = self._filter_currency(all_rows, currency)
+        return unusual_transactions(rows, period)
 
     def category_spikes(
-        self, current: date, previous: date | None = None
+        self, current: date, previous: date | None = None, currency: str = "GBP"
     ) -> list[dict[str, object]]:
         previous = previous or (current.replace(day=1) - timedelta(days=1))
-        return category_spikes(self.transactions.all(), current, previous)
+        all_rows = self.transactions.all()
+        rows = self._filter_currency(all_rows, currency)
+        return category_spikes(rows, current, previous)
 
     def category_trend(
-        self, category: str, as_of: date, months: int = 6
+        self, category: str, as_of: date, months: int = 6, currency: str = "GBP"
     ) -> list[dict[str, int | str]]:
-        return category_trend(self.transactions.all(), category, as_of, months)
+        all_rows = self.transactions.all()
+        rows = self._filter_currency(all_rows, currency)
+        return category_trend(rows, category, as_of, months)
 
 
 def current_cash(
-    accounts: list[AccountModel], transactions: list[TransactionModel], as_of: date | None = None
+    accounts: list[AccountModel],
+    transactions: list[TransactionModel],
+    currency: str = "GBP",
+    as_of: date | None = None,
 ) -> int:
+    curr = currency.upper()
     opening = sum(
         account.opening_balance_minor
         for account in accounts
         if account.account_type not in {item.value for item in NON_CASH_ACCOUNT_TYPES}
+        and (getattr(account, "currency", None) or "GBP").upper() == curr
     )
     return opening + sum(
-        _cash_delta(row) for row in transactions if as_of is None or row.transaction_date <= as_of
+        _cash_delta(row)
+        for row in transactions
+        if (getattr(row, "currency", None) or "GBP").upper() == curr
+        and (as_of is None or row.transaction_date <= as_of)
     )

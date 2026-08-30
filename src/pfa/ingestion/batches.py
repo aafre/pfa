@@ -14,13 +14,14 @@ import concurrent.futures
 import json
 import logging
 import uuid
+from collections import Counter
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from pfa.config import Settings
 from pfa.db.models import ImportBatchModel
 from pfa.db.unit_of_work import UnitOfWork
-from pfa.domain.errors import BatchError
+from pfa.domain.errors import BatchError, ImportRowError
 from pfa.ingestion.service import ImportService
 
 from .candidates import (
@@ -34,6 +35,7 @@ from .candidates import (
     EXTRACTION_FAILED,
     EXTRACTION_TIMEOUT,
     NO_USABLE_ROWS,
+    STATEMENT_YEAR_INFERRED,
     TOO_MANY_ROWS,
     VALID,
     WARNING,
@@ -44,7 +46,10 @@ from .candidates import (
     StatementSource,
     candidates_from_json,
     candidates_to_json,
+    is_year_bearing_date,
+    parse_date,
 )
+from .dialects import Dialect, dialect_for_name
 from .extractors.csv import CsvStatementExtractor
 from .extractors.ocr import OcrFallbackPdfExtractor
 from .extractors.pdf import clean_amount_text
@@ -102,19 +107,23 @@ def batch_committed_transaction_ids(batch: ImportBatchModel) -> list[int]:
     return list(json.loads(batch.committed_transaction_ids_json))
 
 
-def _extractor_for(source: StatementSource, settings: Settings) -> StatementExtractor:
-    """Picks the extractor from the extension the upload policy already validated.
-
-    PDFs always go through the OCR-fallback wrapper: it runs native extraction first and
-    only reaches for Tesseract on pages that have no usable text of their own.
-    """
+def _extractor_for(
+    source: StatementSource,
+    settings: Settings,
+    account_name: str | None = None,
+    account_currency: str = "GBP",
+) -> StatementExtractor:
+    """Picks the extractor from the extension the upload policy already validated."""
+    dialect = dialect_for_name(account_name)
     if source.path.suffix.lower() == ".pdf":
         return OcrFallbackPdfExtractor(
             settings=settings,
             max_pdf_pages=settings.max_pdf_pages,
             max_candidate_rows=settings.max_candidate_rows,
+            dialect=dialect,
+            currency=account_currency,
         )
-    return CsvStatementExtractor()
+    return CsvStatementExtractor(dialect=dialect, currency=account_currency)
 
 
 def _run_extraction(
@@ -143,6 +152,51 @@ def _fail(batch: ImportBatchModel, uow: UnitOfWork, code: str, message: str) -> 
     return uow.import_batches.add(batch)
 
 
+def _normalize_dates(
+    candidates: list[CandidateTransaction], dialect: Dialect
+) -> CandidateIssue | None:
+    """Resolves every year-less date (`Jul31`, `21 Jul`) against the year the rest of this
+    statement's dates carry, then rewrites the candidate's date string to ISO so every later
+    parse - validation, commit - sees that same resolved year, never whatever year the
+    import happens to run in.
+
+    Returns a warning issue when no row in the statement carried a year of its own, so the
+    fallback to today's year is visible in the preview rather than silent.
+    """
+    years_seen: list[int] = []
+    for candidate in candidates:
+        text = candidate.transaction_date
+        if text and is_year_bearing_date(text, dialect.date_order):
+            try:
+                years_seen.append(parse_date(text, dialect.date_order).year)
+            except ImportRowError:
+                continue
+    inferred_year = Counter(years_seen).most_common(1)[0][0] if years_seen else date.today().year
+
+    used_fallback = False
+    for candidate in candidates:
+        for attr in ("transaction_date", "posted_date"):
+            text = getattr(candidate, attr)
+            if not text:
+                continue
+            try:
+                resolved = parse_date(text, dialect.date_order, inferred_year)
+            except ImportRowError:
+                continue
+            if not is_year_bearing_date(text, dialect.date_order):
+                used_fallback = True
+            setattr(candidate, attr, resolved.isoformat())
+
+    if years_seen or not used_fallback:
+        return None
+    return CandidateIssue(
+        STATEMENT_YEAR_INFERRED,
+        f"no date in this statement carried its own year; {inferred_year} was assumed for "
+        "year-less dates - check the preview before committing",
+        WARNING,
+    )
+
+
 def create_batch(
     uow: UnitOfWork,
     source: StatementSource,
@@ -151,7 +205,17 @@ def create_batch(
     account: str | None = None,
 ) -> ImportBatchModel:
     now = _now()
-    extractor = _extractor_for(source, settings)
+    account_currency = "GBP"
+    if account:
+        existing_acc = uow.accounts.get_by_name(account)
+        if existing_acc is not None:
+            account_currency = existing_acc.currency
+
+    extractor = _extractor_for(
+        source, settings, account_name=account, account_currency=account_currency
+    )
+    dialect = dialect_for_name(account)
+
     batch = ImportBatchModel(
         id=uuid.uuid4().hex,
         original_filename=source.original_filename,
@@ -161,6 +225,7 @@ def create_batch(
         extractor=extractor.name,
         status="extracting",
         destination_account=account,
+        amount_sign=dialect.default_sign,
         issues_json="[]",
         counts_json=json.dumps(_counts([])),
         created_at=now,
@@ -190,15 +255,34 @@ def create_batch(
             )
         )
 
+    year_issue = _normalize_dates(candidates, dialect)
+    if year_issue:
+        extraction.issues.append(year_issue)
+
     service = ImportService(uow)
     service.validate(candidates)
+    if batch.amount_sign:
+        for candidate in candidates:
+            _apply_amount_sign(candidate, batch.amount_sign)
     service.resolve_duplicates(candidates)
 
     if not candidates and not any(issue.severity == ERROR for issue in extraction.issues):
         extraction.issues.append(CandidateIssue(NO_USABLE_ROWS, "no transactions were found"))
 
+    parsed_dates: list[date] = []
+    for candidate in candidates:
+        if not candidate.transaction_date:
+            continue
+        try:
+            parsed_dates.append(date.fromisoformat(candidate.transaction_date))
+        except ValueError:
+            continue
+    if parsed_dates:
+        batch.statement_start = min(parsed_dates)
+        batch.statement_end = max(parsed_dates)
+
     batch.detected_account = extraction.detected_account
-    batch.detected_currency = extraction.detected_currency
+    batch.detected_currency = extraction.detected_currency or account_currency
     batch.page_count = extraction.page_count
     blocked = any(issue.severity == ERROR for issue in extraction.issues)
     batch.status = "blocked" if blocked else "preview_ready"
@@ -253,10 +337,13 @@ def _apply_amount_sign(candidate: CandidateTransaction, convention: str) -> None
 
     The direction is re-derived from the raw text rather than flipped, so sending a
     convention twice - or switching back - always lands on the same answer. Rows whose
-    source stated the direction in its own debit/credit column are left alone: their
-    convention is not in doubt, and the extractor already resolved it.
+    source stated the direction in its own debit/credit column - or an explicit CR/CREDIT
+    marker, own-line or inline - are left alone: their convention is not in doubt, and the
+    extractor already resolved it.
     """
     if candidate.direction is None:
+        return
+    if candidate.direction_explicit:
         return
     if "debit" in candidate.raw_fields or "credit" in candidate.raw_fields:
         return

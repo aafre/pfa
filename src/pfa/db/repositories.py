@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -10,6 +11,7 @@ from pfa.domain.transactions import TransactionKind
 from .models import (
     AccountModel,
     BudgetModel,
+    FxRateModel,
     GoalModel,
     ImportBatchModel,
     MerchantRuleModel,
@@ -75,6 +77,11 @@ class AccountRepository:
             self.session.add(account)
             self.session.flush()
         return account
+
+    def get_by_name(self, name: str) -> AccountModel | None:
+        """Read-only lookup - never creates a row, so a preview never has the side effect
+        of persisting an account for a batch that might still be discarded."""
+        return self.session.scalar(select(AccountModel).where(AccountModel.name == name))
 
     def all(self) -> list[AccountModel]:
         return list(self.session.scalars(select(AccountModel).order_by(AccountModel.name)))
@@ -149,3 +156,135 @@ class GoalRepository:
         self.session.add(goal)
         self.session.flush()
         return goal
+
+
+class FxRateRepository:
+    def __init__(self, session: Session):
+        self.session = session
+
+    def all(self) -> list[FxRateModel]:
+        return list(
+            self.session.scalars(select(FxRateModel).order_by(FxRateModel.effective_at.desc()))
+        )
+
+    def add(self, fx_rate: FxRateModel) -> FxRateModel:
+        self.session.add(fx_rate)
+        self.session.flush()
+        return fx_rate
+
+    def set_rate(
+        self,
+        base_currency: str,
+        quote_currency: str,
+        rate: Decimal | str | float,
+        effective_at: date,
+        source: str = "manual",
+    ) -> FxRateModel:
+        base = base_currency.upper()
+        quote = quote_currency.upper()
+        rate_str = str(rate)
+        now = datetime.now(UTC).replace(tzinfo=None)
+        statement = select(FxRateModel).where(
+            FxRateModel.base_currency == base,
+            FxRateModel.quote_currency == quote,
+            FxRateModel.effective_at == effective_at,
+        )
+        existing = self.session.scalar(statement)
+        if existing is not None:
+            existing.rate = rate_str
+            existing.source = source
+            existing.retrieved_at = now
+            self.session.flush()
+            return existing
+        model = FxRateModel(
+            base_currency=base,
+            quote_currency=quote,
+            rate=rate_str,
+            effective_at=effective_at,
+            source=source,
+            retrieved_at=now,
+        )
+        self.session.add(model)
+        self.session.flush()
+        return model
+
+    def rate_on(
+        self, effective_date: date, base: str, quote: str
+    ) -> tuple[Decimal, FxRateModel | None] | None:
+        """Finds nearest rate at or before effective_date (never after).
+        Returns (rate_decimal, matched_model_or_none).
+        """
+        base_upper = base.upper()
+        quote_upper = quote.upper()
+        if base_upper == quote_upper:
+            return Decimal("1.0"), None
+
+        # Direct rate lookup: 1 base = rate quote
+        direct_stmt = (
+            select(FxRateModel)
+            .where(
+                FxRateModel.base_currency == base_upper,
+                FxRateModel.quote_currency == quote_upper,
+                FxRateModel.effective_at <= effective_date,
+            )
+            .order_by(FxRateModel.effective_at.desc())
+            .limit(1)
+        )
+        direct = self.session.scalar(direct_stmt)
+        if direct is not None:
+            return Decimal(direct.rate), direct
+
+        # Inverse rate lookup: 1 quote = rate base => 1 base = 1 / rate quote
+        inverse_stmt = (
+            select(FxRateModel)
+            .where(
+                FxRateModel.base_currency == quote_upper,
+                FxRateModel.quote_currency == base_upper,
+                FxRateModel.effective_at <= effective_date,
+            )
+            .order_by(FxRateModel.effective_at.desc())
+            .limit(1)
+        )
+        inverse = self.session.scalar(inverse_stmt)
+        if inverse is not None:
+            inv_rate = Decimal(inverse.rate)
+            if inv_rate != Decimal(0):
+                return Decimal(1) / inv_rate, inverse
+
+        return None
+
+    def latest(self, base: str, quote: str) -> tuple[Decimal, FxRateModel | None] | None:
+        base_upper = base.upper()
+        quote_upper = quote.upper()
+        if base_upper == quote_upper:
+            return Decimal("1.0"), None
+
+        direct_stmt = (
+            select(FxRateModel)
+            .where(
+                FxRateModel.base_currency == base_upper,
+                FxRateModel.quote_currency == quote_upper,
+            )
+            .order_by(FxRateModel.effective_at.desc())
+            .limit(1)
+        )
+        direct = self.session.scalar(direct_stmt)
+        if direct is not None:
+            return Decimal(direct.rate), direct
+
+        inverse_stmt = (
+            select(FxRateModel)
+            .where(
+                FxRateModel.base_currency == quote_upper,
+                FxRateModel.quote_currency == base_upper,
+            )
+            .order_by(FxRateModel.effective_at.desc())
+            .limit(1)
+        )
+        inverse = self.session.scalar(inverse_stmt)
+        if inverse is not None:
+            inv_rate = Decimal(inverse.rate)
+            if inv_rate != Decimal(0):
+                return Decimal(1) / inv_rate, inverse
+
+        return None

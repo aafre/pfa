@@ -125,3 +125,19 @@ class MerchantRuleModel(Base):
     category: Mapped[str | None] = mapped_column(String(40), nullable=True)
     transfer_purpose: Mapped[str | None] = mapped_column(String(30), nullable=True)
     created_from_user_correction: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class FxRateModel(Base):
+    __tablename__ = "fx_rates"
+    __table_args__ = (
+        UniqueConstraint(
+            "base_currency", "quote_currency", "effective_at", name="uq_fx_rates_base_quote_date"
+        ),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    base_currency: Mapped[str] = mapped_column(String(3))
+    quote_currency: Mapped[str] = mapped_column(String(3))
+    rate: Mapped[str] = mapped_column(String(32))
+    effective_at: Mapped[date] = mapped_column(Date, index=True)
+    source: Mapped[str] = mapped_column(String(50), default="manual")
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

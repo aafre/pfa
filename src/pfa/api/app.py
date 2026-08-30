@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -39,6 +40,7 @@ from pfa.ingestion.service import ImportService
 from pfa.ingestion.upload import stage_upload, sweep_upload_dir
 from pfa.observability import TimedOperation
 from pfa.services.answers import deterministic_answer
+from pfa.services.fx import fetch_and_store_fx_rates
 from pfa.services.health import health_report
 from pfa.services.review import monthly_review_evidence
 from pfa.services.runtime import close_services, open_services
@@ -132,6 +134,28 @@ class ScenarioRequest(BaseModel):
     cost_minor: int = Field(ge=0)
     horizon_months: int = Field(default=3, ge=1, le=120)
     month: str | None = None
+    currency: str = "GBP"
+
+
+class FxRateResponse(BaseModel):
+    id: int
+    base_currency: str
+    quote_currency: str
+    rate: str  # decimal string - never float; see domain/fx.py
+    effective_at: date
+    source: str | None = None
+
+
+class FxRateSetRequest(BaseModel):
+    base_currency: str
+    quote_currency: str
+    rate: str  # decimal string - never float; see domain/fx.py
+    effective_at: date | None = None
+
+
+class FxFetchRequest(BaseModel):
+    base_currency: str = "GBP"
+    on_date: date | None = None
 
 
 def _issue_response(issue: CandidateIssue) -> CandidateIssueResponse:
@@ -406,29 +430,114 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             close_services(engine, services)
 
-    @app.get("/analytics/monthly")
-    def monthly(month: str | None = None) -> dict[str, object]:
+    @app.get("/fx/rates", response_model=list[FxRateResponse])
+    def get_fx_rates(
+        base: str | None = None,
+        quote: str | None = None,
+    ) -> list[FxRateResponse]:
         engine, services = open_services(active_settings)
         try:
-            return services.analytics.monthly_summary(_month(month)).model_dump()
+            rates = services.uow.fx_rates.all()
+            if base:
+                rates = [r for r in rates if r.base_currency == base.upper()]
+            if quote:
+                rates = [r for r in rates if r.quote_currency == quote.upper()]
+            return [
+                FxRateResponse(
+                    id=r.id,
+                    base_currency=r.base_currency,
+                    quote_currency=r.quote_currency,
+                    rate=r.rate,
+                    effective_at=r.effective_at,
+                    source=r.source,
+                )
+                for r in rates
+            ]
+        finally:
+            close_services(engine, services)
+
+    @app.post("/fx/rates", response_model=FxRateResponse)
+    def set_fx_rate(request: FxRateSetRequest) -> FxRateResponse:
+        try:
+            rate = Decimal(request.rate)
+        except InvalidOperation as exc:
+            raise HTTPException(status_code=422, detail=f"invalid rate {request.rate!r}") from exc
+        engine, services = open_services(active_settings)
+        try:
+            effective_at = request.effective_at or date.today()
+            model = services.uow.fx_rates.set_rate(
+                request.base_currency.upper(),
+                request.quote_currency.upper(),
+                rate,
+                effective_at=effective_at,
+            )
+            response = FxRateResponse(
+                id=model.id,
+                base_currency=model.base_currency,
+                quote_currency=model.quote_currency,
+                rate=model.rate,
+                effective_at=model.effective_at,
+                source=model.source,
+            )
+            close_services(engine, services)
+            return response
+        except Exception:
+            close_services(engine, services, False)
+            raise
+
+    @app.post("/fx/fetch", response_model=list[FxRateResponse])
+    def fetch_fx_rates(request: FxFetchRequest) -> list[FxRateResponse]:
+        engine, services = open_services(active_settings)
+        try:
+            models = fetch_and_store_fx_rates(
+                services.uow,
+                base_currency=request.base_currency.upper(),
+                on_date=request.on_date or date.today(),
+            )
+            response = [
+                FxRateResponse(
+                    id=m.id,
+                    base_currency=m.base_currency,
+                    quote_currency=m.quote_currency,
+                    rate=m.rate,
+                    effective_at=m.effective_at,
+                    source=m.source,
+                )
+                for m in models
+            ]
+            close_services(engine, services)
+            return response
+        except Exception:
+            close_services(engine, services, False)
+            raise
+
+    @app.get("/analytics/monthly")
+    def monthly(month: str | None = None, currency: str = "GBP") -> dict[str, object]:
+        engine, services = open_services(active_settings)
+        try:
+            return services.analytics.monthly_summary(_month(month), currency=currency).model_dump()
         finally:
             close_services(engine, services)
 
     @app.get("/analytics/categories")
-    def categories(month: str | None = None) -> list[dict[str, object]]:
+    def categories(month: str | None = None, currency: str = "GBP") -> list[dict[str, object]]:
         engine, services = open_services(active_settings)
         try:
             return [
-                item.model_dump() for item in services.analytics.category_spending(_month(month))
+                item.model_dump()
+                for item in services.analytics.category_spending(_month(month), currency=currency)
             ]
         finally:
             close_services(engine, services)
 
     @app.get("/budgets")
-    def budgets(month: str | None = None) -> list[dict[str, object]]:
+    def budgets(month: str | None = None, currency: str = "GBP") -> list[dict[str, object]]:
         engine, services = open_services(active_settings)
         try:
-            return [item.model_dump() for item in services.analytics.budget_status(_month(month))]
+            return [
+                item.model_dump()
+                for item in services.analytics.budget_status(_month(month), currency=currency)
+            ]
         finally:
             close_services(engine, services)
 
@@ -445,7 +554,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         engine, services = open_services(active_settings)
         try:
             return services.planning.simulate_purchase(
-                request.cost_minor, request.horizon_months, _month(request.month)
+                request.cost_minor,
+                request.horizon_months,
+                _month(request.month),
+                currency=request.currency,
             ).model_dump()
         finally:
             close_services(engine, services)
@@ -481,10 +593,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             close_services(engine, services)
 
     @app.get("/reviews/monthly")
-    def review(month: str | None = None) -> dict[str, object]:
+    def review(month: str | None = None, currency: str = "GBP") -> dict[str, object]:
         engine, services = open_services(active_settings)
         try:
-            return monthly_review_evidence(services.analytics, _month(month))
+            return monthly_review_evidence(services.analytics, _month(month), currency=currency)
         finally:
             close_services(engine, services)
 

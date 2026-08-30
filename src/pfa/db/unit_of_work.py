@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from .repositories import (
     AccountRepository,
     BudgetRepository,
+    FxRateRepository,
     GoalRepository,
     ImportBatchRepository,
     RuleRepository,
@@ -21,3 +22,4 @@ class UnitOfWork:
         self.budgets = BudgetRepository(session)
         self.goals = GoalRepository(session)
         self.import_batches = ImportBatchRepository(session)
+        self.fx_rates = FxRateRepository(session)

@@ -20,6 +20,7 @@ from pfa.ingestion.candidates import (
     parse_amount,
     parse_date,
 )
+from pfa.ingestion.dialects import GENERIC, Dialect
 
 DATE_ALIASES = HEADER_ALIASES["date"]
 DESCRIPTION_ALIASES = HEADER_ALIASES["description"]
@@ -79,7 +80,9 @@ def _is_headerless(cells: list[str]) -> bool:
     )
 
 
-def read_csv_rows(path: Path) -> Iterator[dict[str, str]]:
+def read_csv_rows(
+    path: Path, default_currency: str = "GBP", dialect: Dialect = GENERIC
+) -> Iterator[dict[str, str]]:
     delimiter = _delimiter(path)
     with path.open(newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle, delimiter=delimiter)
@@ -102,7 +105,7 @@ def read_csv_rows(path: Path) -> Iterator[dict[str, str]]:
                 "amount": _value(row, *AMOUNT_ALIASES),
                 "debit": _value(row, *DEBIT_ALIASES),
                 "credit": _value(row, *CREDIT_ALIASES),
-                "currency": _value(row, "currency") or "GBP",
+                "currency": _value(row, "currency") or default_currency or "GBP",
                 "kind": _value(row, "kind", "transaction_kind"),
                 "category": _value(row, "category"),
                 "transfer_purpose": _value(row, "transfer_purpose"),
@@ -159,11 +162,18 @@ class CsvStatementExtractor:
 
     name = "csv/1"
 
+    def __init__(self, dialect: Dialect = GENERIC, currency: str = "GBP") -> None:
+        self.dialect = dialect
+        self.currency = currency
+
     def extract(self, source: StatementSource) -> ExtractionResult:
         result = ExtractionResult(extractor=self.name)
         positional = False
         try:
-            for index, row in enumerate(read_csv_rows(source.path), start=1):
+            for index, row in enumerate(
+                read_csv_rows(source.path, default_currency=self.currency, dialect=self.dialect),
+                start=1,
+            ):
                 positional = positional or bool(row["_positional"])
                 result.candidates.append(_candidate(f"c{index}", row))
         except ImportRowError as exc:

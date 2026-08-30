@@ -123,14 +123,15 @@ def test_dry_run_rolls_back_accounts_transactions_and_state(tmp_path) -> None:
 def test_unsupported_currency_fails_closed_instead_of_reporting_false_gbp(tmp_path) -> None:
     path = tmp_path / "currency.csv"
     path.write_text(
-        "date,description,amount,kind,currency\n2026-08-01,Salary,1000,income,USD\n",
+        "date,description,amount,kind,currency\n2026-08-01,Salary,1000,income,XYZ\n",
         encoding="utf-8",
     )
     engine, uow, _ = services()
     result = ImportService(uow).import_csv(path)
 
     assert result.imported == 0
-    assert result.errors == ["row 2: unsupported currency 'USD'; PFA v0.1 supports GBP only"]
+    assert len(result.errors) == 1
+    assert "unsupported currency 'XYZ'" in result.errors[0]
     assert uow.transactions.all() == []
     uow.session.close()
     engine.dispose()
@@ -199,5 +200,62 @@ def test_headerless_export_imports_every_row_with_the_signs_it_was_written_with(
         (195, "debit"),
         (1_438, "debit"),
     ]
+    uow.session.close()
+    engine.dispose()
+
+
+def test_mixed_currency_analytics_strictly_partitions_currencies_without_sum_pollution(
+    tmp_path,
+) -> None:
+    """Invariant: an INR account alongside GBP must NEVER sum into 405,000 of something."""
+    path_gbp = tmp_path / "gbp.csv"
+    path_gbp.write_text(
+        "date,description,amount,kind,category,currency,account\n"
+        "2026-08-01,Salary,5000,income,,GBP,UK Bank\n"
+        "2026-08-05,Groceries,-200,expense,groceries,GBP,UK Bank\n",
+        encoding="utf-8",
+    )
+    path_inr = tmp_path / "inr.csv"
+    path_inr.write_text(
+        "date,description,amount,kind,category,currency,account\n"
+        "2026-08-01,Consulting,400000,income,,INR,India Bank\n"
+        "2026-08-10,Rent,-50000,expense,housing,INR,India Bank\n",
+        encoding="utf-8",
+    )
+
+    engine, uow, analytics = services()
+    importer = ImportService(uow)
+    importer.import_csv(path_gbp)
+    importer.import_csv(path_inr)
+
+    # Check GBP analytics
+    gbp_summary = analytics.monthly_summary(date(2026, 8, 1), currency="GBP")
+    assert gbp_summary.currency == "GBP"
+    assert gbp_summary.income_minor == 500_000  # 5,000.00 GBP
+    assert gbp_summary.spending_minor == 20_000  # 200.00 GBP
+    assert gbp_summary.net_cashflow_minor == 480_000
+    assert gbp_summary.transaction_count == 2
+
+    # Check INR analytics
+    inr_summary = analytics.monthly_summary(date(2026, 8, 1), currency="INR")
+    assert inr_summary.currency == "INR"
+    assert inr_summary.income_minor == 40_000_000  # 400,000.00 INR
+    assert inr_summary.spending_minor == 5_000_000  # 50,000.00 INR
+    assert inr_summary.net_cashflow_minor == 35_000_000
+    assert inr_summary.transaction_count == 2
+
+    # Verify category spending is partitioned
+    gbp_cats = {
+        item.category: item.total_minor
+        for item in analytics.category_spending(date(2026, 8, 1), currency="GBP")
+    }
+    assert gbp_cats == {"groceries": 20_000}
+
+    inr_cats = {
+        item.category: item.total_minor
+        for item in analytics.category_spending(date(2026, 8, 1), currency="INR")
+    }
+    assert inr_cats == {"housing": 5_000_000}
+
     uow.session.close()
     engine.dispose()

@@ -32,6 +32,7 @@ from pfa.ingestion.candidates import (
     ExtractionResult,
     StatementSource,
 )
+from pfa.ingestion.dialects import GENERIC, Dialect
 from pfa.ingestion.extractors.pdf import PdfStatementExtractor, Word
 
 
@@ -204,6 +205,8 @@ class OcrFallbackPdfExtractor:
         runner: TesseractRunner | None = None,
         max_pdf_pages: int | None = None,
         max_candidate_rows: int | None = None,
+        dialect: Dialect = GENERIC,
+        currency: str = "GBP",
     ) -> None:
         settings = settings or get_settings()
         word_provider: Callable[[Page], list[Word]]
@@ -227,6 +230,8 @@ class OcrFallbackPdfExtractor:
             max_candidate_rows=max_candidate_rows,
             word_provider=word_provider,
             ocr_min_confidence=settings.ocr_min_confidence,
+            dialect=dialect,
+            currency=currency,
         )
 
     def extract(self, source: StatementSource) -> ExtractionResult:
