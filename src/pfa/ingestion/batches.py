@@ -144,7 +144,7 @@ def _now() -> datetime:
 def _counts(candidates: list[CandidateTransaction]) -> dict[str, int]:
     return {
         "total": len(candidates),
-        "valid": sum(1 for c in candidates if c.state == VALID),
+        "valid": sum(1 for c in candidates if c.state == VALID and c.included),
         "warning": sum(1 for c in candidates if c.state == WARNING),
         "error": sum(1 for c in candidates if c.state == ERROR),
         "duplicate": sum(1 for c in candidates if c.duplicate_of is not None),
@@ -254,11 +254,17 @@ def _run_extraction(
     try:
         return future.result(timeout=settings.extraction_timeout_seconds)
     except concurrent.futures.TimeoutError:
-        # ponytail: a running parser thread cannot be killed and still holds the staged
-        # file open, so the request's own unlink can lose to it. Hand cleanup to the
-        # worker's completion rather than leaking the statement; upgrade path is a
-        # cancellable out-of-process extractor if nominal timeouts stop being enough.
-        future.add_done_callback(lambda _: source.path.unlink(missing_ok=True))
+        def _cleanup(_: concurrent.futures.Future[Any]) -> None:
+            import time
+
+            for _ in range(5):
+                try:
+                    source.path.unlink(missing_ok=True)
+                    return
+                except (PermissionError, OSError):
+                    time.sleep(0.5)
+
+        future.add_done_callback(_cleanup)
         raise
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
@@ -586,8 +592,13 @@ def _set_reconciliation(
                 )
             )
         if result["coverage_integrity"] == "incomplete":
+            severity = ERROR if batch.adapter_id == "hdfc_in_delimited_v1" else WARNING
             issues.append(
-                CandidateIssue(RECONCILIATION_INCOMPLETE, "not every statement row is included")
+                CandidateIssue(
+                    RECONCILIATION_INCOMPLETE,
+                    "not every statement row is included",
+                    severity=severity,
+                )
             )
         return issues
     return []
@@ -829,15 +840,17 @@ def apply_patch(uow: UnitOfWork, batch_id: str, patch: BatchPatch) -> ImportBatc
 
     if patch.account_metadata_update is not None:
         update = patch.account_metadata_update
+        dialect = _batch_dialect(batch)
         if (
             patch.destination_account_id is None
-            or batch.adapter_id != "hdfc_in_delimited_v1"
+            or not dialect.institution
             or set(update) != {"institution"}
-            or _institution_key(update.get("institution")) != "hdfc_bank"
+            or _institution_key(update.get("institution")) != _institution_key(dialect.institution)
         ):
+            inst_label = dialect.institution or "the detected institution"
             raise BatchError(
                 INVALID_ACCOUNT_METADATA_UPDATE,
-                "only a missing legacy institution may be marked as HDFC Bank",
+                f"only a missing legacy institution may be marked as {inst_label}",
                 422,
             )
         metadata_account = uow.accounts.get(patch.destination_account_id)
@@ -849,7 +862,7 @@ def apply_patch(uow: UnitOfWork, batch_id: str, patch: BatchPatch) -> ImportBatc
                 "institution correction is allowed only when the account institution is missing",
                 422,
             )
-        metadata_account.institution = "hdfc_bank"
+        metadata_account.institution = dialect.institution
 
     candidates = batch_candidates(batch)
 

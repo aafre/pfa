@@ -205,6 +205,14 @@ class ImportBatchRepository:
         )
         return list(self.session.scalars(statement))
 
+    def list(self, limit: int = 50, status: str | None = None) -> list[ImportBatchModel]:
+        statement = select(ImportBatchModel).order_by(ImportBatchModel.created_at.desc())
+        if status:
+            statement = statement.where(ImportBatchModel.status == status)
+        if limit:
+            statement = statement.limit(limit)
+        return list(self.session.scalars(statement))
+
 
 class TransferRepository:
     def __init__(self, session: Session):

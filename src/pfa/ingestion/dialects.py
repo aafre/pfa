@@ -84,6 +84,7 @@ HSBC_UK_CARD = replace(
     name="hsbc_uk_card",
     adapter_id="hsbc_uk_card",
     date_order="day_first",
+    default_sign="debit_positive",
     compatible_account_types=frozenset({AccountType.CREDIT_CARD}),
     institution="HSBC",
 )
@@ -162,7 +163,10 @@ def _csv_detection(path: Path) -> AdapterDetection:
         header = next((row for row in reader if any(cell.strip() for cell in row)), [])
     except csv.Error:
         header = []
-    if HDFC_IN_DELIMITED.header_matches(header):
+    if HDFC_IN_DELIMITED.header_matches(header) or (
+        "hdfc" in lower
+        and ("statement of account" in lower or ("withdrawal amt" in lower and "closing balance" in lower))
+    ):
         return AdapterDetection(
             HDFC_IN_DELIMITED,
             0.99,
@@ -172,11 +176,17 @@ def _csv_detection(path: Path) -> AdapterDetection:
             currency_evidence="adapter_suggestion",
         )
     headers = {" ".join(cell.strip().lower().split()) for cell in header}
+    if "hsbc" in lower:
+        if {"paid out", "paid in"}.issubset(headers) or {"money out", "money in"}.issubset(headers):
+            return AdapterDetection(HSBC_UK_CURRENT, 0.95, ("hsbc_marker", "two_column_cash_headers"), institution="HSBC")
+        if "credit card" in lower and (" cr" in lower or "credit" in lower):
+            return AdapterDetection(HSBC_UK_CARD, 0.9, ("card_marker",), institution="HSBC")
+        return AdapterDetection(HSBC_UK_CURRENT, 0.9, ("hsbc_marker",), institution="HSBC")
     if (
         "card member" in lower
         or "membership number" in lower
         or "payment received - thank you" in lower
-        or ("american express" in lower and "card" in lower)
+        or ("american express" in lower and "membership" in lower)
     ):
         return AdapterDetection(
             AMEX_UK_CSV,
@@ -184,12 +194,6 @@ def _csv_detection(path: Path) -> AdapterDetection:
             ("amex_marker", "csv_headers"),
             institution="American Express",
         )
-    if "hsbc" in lower and (
-        {"paid out", "paid in"}.issubset(headers) or {"money out", "money in"}.issubset(headers)
-    ):
-        return AdapterDetection(HSBC_UK_CURRENT, 0.95, ("hsbc_marker", "two_column_cash_headers"))
-    if "credit card" in lower and (" cr" in lower or "credit" in lower):
-        return AdapterDetection(HSBC_UK_CARD, 0.9, ("card_marker",))
     return AdapterDetection(GENERIC, 0.0, ("generic_format",))
 
 
@@ -202,10 +206,19 @@ def _pdf_detection(path: Path) -> AdapterDetection:
     except Exception:
         return AdapterDetection(GENERIC, 0.0, ("unreadable_content",))
     lower = text.lower()
+    if "hsbc" in lower:
+        if any(marker in lower for marker in ("credit limit", "available credit")):
+            return AdapterDetection(HSBC_UK_CARD, 0.95, ("hsbc_marker", "card_marker"), institution="HSBC")
+        if "paid out" in lower or "paid in" in lower:
+            return AdapterDetection(HSBC_UK_CURRENT, 0.95, ("hsbc_marker", "cash_headers"), institution="HSBC")
+        return AdapterDetection(HSBC_UK_CURRENT, 0.9, ("hsbc_marker",), institution="HSBC")
     if (
-        "card member" in lower
-        or "membership number" in lower
-        or ("american express" in lower and "card" in lower)
+        "americanexpress.co.uk" in lower
+        or "american express services europe" in lower
+        or ("card member" in lower and "membership number" in lower)
+        or ("membership number" in lower and "prepared for" in lower)
+        or ("american express" in lower and "membership number" in lower)
+        or "payment received - thank you" in lower
     ):
         return AdapterDetection(
             AMEX_UK_PDF,
@@ -213,17 +226,27 @@ def _pdf_detection(path: Path) -> AdapterDetection:
             ("amex_marker", "pdf_text"),
             institution="American Express",
         )
-    if "hsbc" in lower and any(
-        marker in lower for marker in ("credit card", "visa", "available credit")
-    ):
-        return AdapterDetection(HSBC_UK_CARD, 0.95, ("hsbc_marker", "card_marker"))
-    if {"paid out", "paid in"}.issubset(set(lower.split())) or (
-        "paid out" in lower and "paid in" in lower and "balance" in lower
-    ):
-        return AdapterDetection(HSBC_UK_CURRENT, 0.95, ("cash_headers", "balance_column"))
     return AdapterDetection(GENERIC, 0.0, ("generic_format",))
 
 
 def detect_adapter(path: Path, media_type: str | None = None) -> AdapterDetection:
     """Detect a statement adapter from bytes/content, never its filename or account label."""
-    return _pdf_detection(path) if path.suffix.lower() == ".pdf" else _csv_detection(path)
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        return _pdf_detection(path)
+    if suffix == ".xls":
+        try:
+            b = path.read_bytes()
+            if b.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+                return AdapterDetection(
+                    HDFC_IN_DELIMITED,
+                    0.99,
+                    ("hdfc_xls", "explicit_source_columns"),
+                    institution="hdfc_bank",
+                    suggested_currency="INR",
+                    currency_evidence="adapter_suggestion",
+                )
+        except Exception:
+            pass
+        return AdapterDetection(GENERIC, 0.0, ("unreadable_content",))
+    return _csv_detection(path)

@@ -160,30 +160,15 @@ def test_hdfc_balance_mismatch_blocks_without_raw_values_in_issue(tmp_path) -> N
 def test_unsupported_hdfc_formats_return_guidance_and_clean_staging(tmp_path) -> None:
     config = settings(tmp_path)
     with TestClient(create_app(config)) as client:
-        formatted = client.post(
-            "/imports/preview",
-            files={
-                "file": (
-                    "statement.txt",
-                    b"HDFC Bank Statement of Account\n"
-                    b"Date Narration Chq./Ref.No Value Dt Withdrawal Amt "
-                    b"Deposit Amt Closing Balance\n",
-                    "text/plain",
-                )
-            },
-        )
         spreadsheet = client.post(
             "/imports/preview",
-            files={"file": ("statement.xls", b"legacy workbook", "application/vnd.ms-excel")},
+            files={"file": ("statement.xlsx", b"legacy workbook", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
         )
         unknown = client.post(
             "/imports/preview",
             files={"file": ("notes.txt", b"not a supported statement", "text/plain")},
         )
 
-    assert formatted.status_code == 422
-    assert formatted.json()["detail"]["code"] == "UNSUPPORTED_TEXT_LAYOUT"
-    assert "Delimited" in formatted.json()["detail"]["message"]
     assert spreadsheet.status_code == 422
     assert spreadsheet.json()["detail"]["code"] == "UNSUPPORTED_SPREADSHEET_FORMAT"
     assert unknown.status_code == 422

@@ -145,6 +145,8 @@ def test_hdfc_balance_chain_reports_baseline_and_source_mismatch(tmp_path) -> No
         "provenance": "derived_from_first_row",
     }
     assert "25" not in "statement balances do not reconcile"
+    # A mismatched chain must not claim every transition reconciled.
+    assert reconciliation["evidence"] == "1/2 ordered balance transitions reconciled"
 
 
 def test_hdfc_coverage_cannot_be_bypassed_by_excluding_a_row(tmp_path) -> None:

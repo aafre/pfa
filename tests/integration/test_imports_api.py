@@ -546,3 +546,173 @@ def test_amount_sign_is_persisted_and_survives_a_refresh_and_later_patches(tmp_p
         assert committed["candidates"] == []
         assert committed["amount_sign"] == "debit_positive"
         assert fresh_client.get(f"/imports/{batch_id}").json()["amount_sign"] == "debit_positive"
+
+
+def test_counts_valid_decrements_when_candidates_excluded(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        body = _upload(client, _csv_bytes()).json()
+        batch_id = body["id"]
+        assert body["counts"]["valid"] == 3
+        assert body["counts"]["excluded"] == 0
+
+        c_ids = [c["candidate_id"] for c in body["candidates"]]
+
+        # Exclude 1 candidate
+        p1 = client.patch(
+            f"/imports/{batch_id}", json={"excluded_candidate_ids": [c_ids[0]]}
+        ).json()
+        assert p1["counts"]["valid"] == 2
+        assert p1["counts"]["excluded"] == 1
+
+        # Exclude 2 candidates
+        p2 = client.patch(
+            f"/imports/{batch_id}", json={"excluded_candidate_ids": [c_ids[0], c_ids[1]]}
+        ).json()
+        assert p2["counts"]["valid"] == 1
+        assert p2["counts"]["excluded"] == 2
+
+        # Re-include all candidates
+        p3 = client.patch(f"/imports/{batch_id}", json={"excluded_candidate_ids": []}).json()
+        assert p3["counts"]["valid"] == 3
+        assert p3["counts"]["excluded"] == 0
+
+
+def _amex_detected_csv_bytes() -> bytes:
+    return (
+        b"Date,Description,Amount,Card Member\n"
+        b"19/08/2026,AMZN MKTPLACE,25.92,John Doe\n"
+        b"19/08/2026,MARYLEBONE STATION,7.00,John Doe\n"
+        b"21/08/2026,PAYMENT RECEIVED - THANK YOU,-150.00,John Doe\n"
+    )
+
+
+def test_non_hdfc_amex_adapter_institution_binding_and_inline_correction(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        # Pre-existing credit card account with missing institution (legacy account)
+        acc_resp = client.post(
+            "/accounts",
+            json={"name": "Legacy Amex Card", "account_type": "credit_card", "currency": "GBP"},
+        )
+        assert acc_resp.status_code == 200
+        account_id = acc_resp.json()["id"]
+        assert acc_resp.json()["institution"] is None
+
+        # Upload Amex statement
+        body = _upload(client, _amex_detected_csv_bytes(), filename="amex.csv").json()
+        batch_id = body["id"]
+        assert body["adapter_id"] == "amex_uk_csv"
+        assert body["detected_institution"] == "American Express"
+
+        # Binding to existing legacy account without institution triggers requirement
+        patched = client.patch(
+            f"/imports/{batch_id}", json={"destination_account_id": account_id}
+        ).json()
+        assert patched["status"] == "blocked"
+        issue_codes = [i["code"] for i in patched["issues"]]
+        assert "ACCOUNT_INSTITUTION_REQUIRED" in issue_codes
+
+        # Committing while blocked is rejected
+        commit_blocked = client.post(f"/imports/{batch_id}/commit")
+        assert commit_blocked.status_code == 409
+
+        # Reject mismatched institution correction
+        bad_patch = client.patch(
+            f"/imports/{batch_id}",
+            json={
+                "destination_account_id": account_id,
+                "account_metadata_update": {"institution": "HSBC"},
+            },
+        )
+        assert bad_patch.status_code == 422
+        assert bad_patch.json()["detail"]["code"] == "INVALID_ACCOUNT_METADATA_UPDATE"
+
+        # Valid inline correction for American Express
+        good_patch = client.patch(
+            f"/imports/{batch_id}",
+            json={
+                "destination_account_id": account_id,
+                "account_metadata_update": {"institution": "American Express"},
+            },
+        )
+        assert good_patch.status_code == 200
+        good_body = good_patch.json()
+        assert good_body["status"] == "preview_ready"
+        assert not any(i["code"] == "ACCOUNT_INSTITUTION_REQUIRED" for i in good_body["issues"])
+
+        # Account now has stored institution
+        accounts = client.get("/accounts").json()
+        matching_acc = next(a for a in accounts if a["id"] == account_id)
+        assert matching_acc["institution"] == "American Express"
+
+        # Once institution is set, subsequent metadata updates to change it are rejected
+        duplicate_update = client.patch(
+            f"/imports/{batch_id}",
+            json={
+                "destination_account_id": account_id,
+                "account_metadata_update": {"institution": "American Express"},
+            },
+        )
+        assert duplicate_update.status_code == 422
+
+        # Batch commits successfully
+        committed = client.post(f"/imports/{batch_id}/commit")
+        assert committed.status_code == 200
+        assert committed.json()["status"] == "committed"
+        assert committed.json()["counts"]["imported"] == 3
+
+
+def test_list_import_batches_endpoint_and_filtering(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        # Initial: empty list
+        assert client.get("/imports").json() == []
+
+        # Upload first batch and commit it
+        b1 = _upload(client, _csv_bytes(), filename="statement_1.csv").json()
+        client.patch(f"/imports/{b1['id']}", json={"account": "Account 1"})
+        client.post(f"/imports/{b1['id']}/commit")
+
+        # Upload second batch and leave it in preview
+        b2 = _upload(client, _csv_bytes(), filename="statement_2.csv").json()
+
+        # List all imports
+        all_imports = client.get("/imports").json()
+        assert len(all_imports) == 2
+        # Sorted by created_at desc (b2 was created after b1)
+        assert [b["id"] for b in all_imports] == [b2["id"], b1["id"]]
+
+        # Filter by status
+        committed_only = client.get("/imports?status=committed").json()
+        assert len(committed_only) == 1
+        assert committed_only[0]["id"] == b1["id"]
+
+        preview_only = client.get("/imports?status=preview_ready").json()
+        assert len(preview_only) == 1
+        assert preview_only[0]["id"] == b2["id"]
+
+        # Limit
+        limited = client.get("/imports?limit=1").json()
+        assert len(limited) == 1
+        assert limited[0]["id"] == b2["id"]
+
+
+def test_undo_import_batch_updates_batch_status_and_ledger(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        b = _upload(client, _csv_bytes(), filename="transactions.csv").json()
+        client.patch(f"/imports/{b['id']}", json={"account": "Ledger Account"})
+        committed = client.post(f"/imports/{b['id']}/commit").json()
+        assert committed["status"] == "committed"
+        assert len(client.get("/transactions").json()) == 3
+
+        # Undo the batch
+        undone = client.post(f"/imports/{b['id']}/undo").json()
+        assert undone["status"] == "undone"
+        assert len(client.get("/transactions").json()) == 0
+
+        # Listed in GET /imports as undone
+        history = client.get("/imports").json()
+        assert len(history) == 1
+        assert history[0]["status"] == "undone"

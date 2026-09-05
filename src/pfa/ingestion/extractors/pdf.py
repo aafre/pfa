@@ -97,9 +97,120 @@ def _table_header(table: list[list[str | None]]) -> dict[int, str] | None:
     return mapping if _has_transaction_header_fields(set(mapping.values())) else None
 
 
+def _unpack_collapsed_table(
+    table: list[list[str | None]], mapping: dict[int, str]
+) -> list[list[str | None]]:
+    if len(table) != 2:
+        return table
+    header = table[0]
+    row = table[1]
+    date_col = next((idx for idx, name in mapping.items() if name == "date"), None)
+    if date_col is None or not any("\n" in (c or "") for c in row):
+        return table
+    dates = [d.strip() for d in (row[date_col] or "").split("\n") if d.strip()]
+    if len(dates) <= 1:
+        return table
+
+    cols_lines = [(c or "").split("\n") for c in row]
+    debit_col = next((idx for idx, name in mapping.items() if name == "debit"), None)
+    credit_col = next((idx for idx, name in mapping.items() if name == "credit"), None)
+    bal_col = next((idx for idx, name in mapping.items() if name == "balance"), None)
+    desc_col = next((idx for idx, name in mapping.items() if name == "description"), None)
+    ref_col = next((idx for idx, name in mapping.items() if name == "reference"), None)
+
+    withs = [
+        w.strip()
+        for w in (cols_lines[debit_col] if debit_col is not None and debit_col < len(cols_lines) else [])
+        if w.strip()
+    ]
+    deps = [
+        d.strip()
+        for d in (cols_lines[credit_col] if credit_col is not None and credit_col < len(cols_lines) else [])
+        if d.strip()
+    ]
+    bals = [
+        b.strip()
+        for b in (cols_lines[bal_col] if bal_col is not None and bal_col < len(cols_lines) else [])
+        if b.strip()
+    ]
+    narrs = [
+        n.strip()
+        for n in (cols_lines[desc_col] if desc_col is not None and desc_col < len(cols_lines) else [])
+        if n.strip()
+    ]
+    refs = [
+        r.strip()
+        for r in (cols_lines[ref_col] if ref_col is not None and ref_col < len(cols_lines) else [])
+        if r.strip()
+    ]
+
+    narr_per_date: list[str] = []
+    current_narr: list[str] = []
+    for n in narrs:
+        if (
+            any(n.startswith(p) for p in ("UPI", "ACH", "NEFT", "INW", "CHQ", "SALARY", "TRANSFER"))
+            and current_narr
+            and len(narr_per_date) < len(dates) - 1
+        ):
+            narr_per_date.append(" ".join(current_narr))
+            current_narr = [n]
+        else:
+            current_narr.append(n)
+    if current_narr:
+        narr_per_date.append(" ".join(current_narr))
+    while len(narr_per_date) < len(dates):
+        narr_per_date.append("")
+
+    w_idx = 0
+    d_idx = 0
+    unpacked = [header]
+
+    for i, dt in enumerate(dates):
+        debit_amt = ""
+        credit_amt = ""
+        try:
+            cur_bal = float(bals[i].replace(",", "")) if i < len(bals) else 0.0
+            if i == 0:
+                if withs:
+                    debit_amt = withs[0]
+                    w_idx = 1
+            else:
+                prev_bal = float(bals[i - 1].replace(",", ""))
+                delta = round(cur_bal - prev_bal, 2)
+                if delta < 0 and w_idx < len(withs):
+                    debit_amt = withs[w_idx]
+                    w_idx += 1
+                elif delta > 0 and d_idx < len(deps):
+                    credit_amt = deps[d_idx]
+                    d_idx += 1
+        except Exception:
+            if w_idx < len(withs):
+                debit_amt = withs[w_idx]
+                w_idx += 1
+
+        new_row = list(row)
+        if date_col is not None and date_col < len(new_row):
+            new_row[date_col] = dt
+        if desc_col is not None and desc_col < len(new_row):
+            new_row[desc_col] = narr_per_date[i] if i < len(narr_per_date) else ""
+        if ref_col is not None and ref_col < len(new_row):
+            new_row[ref_col] = refs[i] if i < len(refs) else ""
+        if debit_col is not None and debit_col < len(new_row):
+            new_row[debit_col] = debit_amt
+        if credit_col is not None and credit_col < len(new_row):
+            new_row[credit_col] = credit_amt
+        if bal_col is not None and bal_col < len(new_row):
+            new_row[bal_col] = bals[i] if i < len(bals) else ""
+
+        unpacked.append(new_row)
+
+    return unpacked
+
+
 def _table_rows(
     table: list[list[str | None]], mapping: dict[int, str], page_number: int
 ) -> list[_RawRow]:
+    table = _unpack_collapsed_table(table, mapping)
     rows: list[_RawRow] = []
     for position, raw_row in enumerate(table[1:], start=1):
         fields = {
@@ -366,30 +477,63 @@ def _line_height(rows: list[_RawRow], header_top: float | None) -> float:
 def _merge_continuations(
     rows: list[_RawRow], header_top: float | None, dialect: Dialect = GENERIC
 ) -> list[_RawRow]:
-    """Joins structurally empty wrapped description lines into the row above them."""
-    has_plausible_row = any(
-        row.top is not None and _is_plausible_data_row(row, dialect) for row in rows
-    )
-    threshold = _line_height(rows, header_top) * _CONTINUATION_FACTOR
+    """Joins structurally empty wrapped description lines into the row above them,
+    propagates active statement dates across multi-line transactions, and filters out non-transaction headers/footers."""
     kept: list[_RawRow] = []
-    last: _RawRow | None = None
+    current_date: str | None = None
+    pending_row: _RawRow | None = None
+
     for row in rows:
-        has_description = bool(row.fields.get("description", "").strip())
-        if (
-            row.top is None
-            or _is_plausible_data_row(row, dialect)
-            or (_has_filled_transaction_cell(row) and (has_plausible_row or has_description))
-        ):
-            kept.append(row)
-            last = row
+        if _is_balance_marker(row):
+            pending_row = None
             continue
-        joined = row.fields.get("description", "").strip() or row.raw_text.strip()
-        if last is not None and last.top is not None and abs(row.top - last.top) <= threshold:
-            if joined:
-                existing = last.fields.get("description", "")
-                last.fields["description"] = f"{existing} {joined}".strip()
-            last.raw_text = f"{last.raw_text} / {row.raw_text}"
-            last.top = row.top
+
+        date_val = row.fields.get("date", "").strip()
+        has_date = _has_parseable_date(row.fields, dialect)
+        has_amt = _has_parseable_amount(row.fields)
+
+        desc = row.fields.get("description", "").lower()
+        date_lower = date_val.lower()
+        if any(date_lower.startswith(p) for p in ("total", "subtotal", "balance", "opening balance", "closing balance")):
+            pending_row = None
+            continue
+
+        if has_date:
+            current_date = date_val
+
+        if not has_date and not has_amt:
+            joined = row.fields.get("description", "").strip() or row.raw_text.strip()
+            if pending_row is not None and joined:
+                existing = pending_row.fields.get("description", "")
+                pending_row.fields["description"] = f"{existing} {joined}".strip()
+                pending_row.raw_text = f"{pending_row.raw_text} / {row.raw_text}"
+                if row.top is not None:
+                    pending_row.top = row.top
+            elif kept and joined and abs((row.top or 0) - (kept[-1].top or 0)) <= _line_height(rows, header_top) * _CONTINUATION_FACTOR:
+                existing = kept[-1].fields.get("description", "")
+                kept[-1].fields["description"] = f"{existing} {joined}".strip()
+                kept[-1].raw_text = f"{kept[-1].raw_text} / {row.raw_text}"
+                if row.top is not None:
+                    kept[-1].top = row.top
+            continue
+
+        if not has_amt:
+            pending_row = row
+            if current_date and not has_date:
+                pending_row.fields["date"] = current_date
+            continue
+
+        if pending_row is not None:
+            desc = f"{pending_row.fields.get('description', '')} {row.fields.get('description', '')}".strip()
+            row.fields["description"] = desc
+            row.fields["date"] = pending_row.fields.get("date") or current_date
+            pending_row = None
+        elif current_date and not row.fields.get("date"):
+            row.fields["date"] = current_date
+
+        if _has_parseable_date(row.fields, dialect) and _has_parseable_amount(row.fields):
+            kept.append(row)
+
     return kept
 
 
@@ -433,6 +577,10 @@ def clean_amount_text(text: str) -> tuple[str, bool]:
     elif upper.startswith("DR"):
         cleaned = cleaned[2:].strip()
         negative = True
+    # Strip any country/currency code prefix or suffix (e.g. "CA 15.11", "20.00USD")
+    match = re.search(r"(\d+(?:\.\d+)?)", cleaned)
+    if match:
+        cleaned = match.group(1)
     return cleaned, negative
 
 
@@ -458,7 +606,11 @@ def _resolve_amount(
     is_explicit_dr = False
     amount_upper = amount_text.upper()
     for marker in dialect.credit_markers:
-        if marker in amount_upper or fields.get("type", "").upper() == marker:
+        if (
+            marker in amount_upper
+            or fields.get("type", "").upper() == marker
+            or fields.get("cr", "").upper() == marker
+        ):
             is_explicit_cr = True
             break
     if amount_upper.endswith("DR") or fields.get("type", "").upper() == "DR":
@@ -473,6 +625,8 @@ def _resolve_amount(
             return _AmountResult(minor=minor, direction="credit", direction_explicit=True)
         if is_explicit_dr:
             return _AmountResult(minor=minor, direction="debit", direction_explicit=True)
+        if dialect.default_sign == "debit_positive":
+            return _AmountResult(minor=minor, direction="credit" if negative else "debit")
         return _AmountResult(minor=minor, direction="debit" if negative else "credit")
 
     if debit_text and credit_text:
@@ -598,6 +752,7 @@ class PdfStatementExtractor:
         ocr_min_confidence: float | None = None,
         dialect: Dialect = GENERIC,
         currency: str = "GBP",
+        password: str | None = None,
     ) -> None:
         self._max_pages = (
             max_pdf_pages if max_pdf_pages is not None else get_settings().max_pdf_pages
@@ -613,22 +768,30 @@ class PdfStatementExtractor:
         )
         self.dialect = dialect
         self.currency = currency
+        self.password = password
 
     def extract(self, source: StatementSource) -> ExtractionResult:
         result = ExtractionResult(extractor=self.name)
+        password = getattr(source, "password", None) or self.password
         try:
-            with pdfplumber.open(source.path) as pdf:
+            with pdfplumber.open(source.path, password=password) as pdf:
                 return self._extract(pdf, result)
-        except PDFPasswordIncorrect:
-            result.issues.append(
-                CandidateIssue(
-                    PDF_ENCRYPTED,
-                    "password-protected PDF import is not supported in this release; "
-                    "remove the password and re-upload",
+        except Exception as exc:
+            is_password_err = isinstance(exc, PDFPasswordIncorrect)
+            if not is_password_err and (
+                isinstance(getattr(exc, "__cause__", None), PDFPasswordIncorrect)
+                or any(isinstance(a, PDFPasswordIncorrect) for a in getattr(exc, "args", ()))
+                or "password" in str(exc).lower()
+            ):
+                is_password_err = True
+            if is_password_err:
+                result.issues.append(
+                    CandidateIssue(
+                        PDF_ENCRYPTED,
+                        "password-protected PDF; enter statement password to decrypt",
+                    )
                 )
-            )
-            return result
-        except Exception:
+                return result
             result.issues.append(
                 CandidateIssue(
                     PDF_NOT_EXTRACTABLE,
@@ -649,10 +812,15 @@ class PdfStatementExtractor:
             )
             return result
 
-        kept: list[_RawRow] = []
+        all_page_rows: list[_RawRow] = []
+        first_header_top: float | None = None
         for page in pdf.pages:
             page_rows, header_top = self._page_rows(page)
-            kept.extend(_merge_continuations(page_rows, header_top, self.dialect))
+            if first_header_top is None and header_top is not None:
+                first_header_top = header_top
+            all_page_rows.extend(page_rows)
+
+        kept = _merge_continuations(all_page_rows, first_header_top, self.dialect)
 
         transaction_rows = [row for row in kept if not _is_balance_marker(row)]
         candidates = [

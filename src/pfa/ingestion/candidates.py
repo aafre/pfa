@@ -99,12 +99,12 @@ HEADER_ALIASES: dict[str, tuple[str, ...]] = {
         "received by us",
         "receivedbyus",
     ),
-    "description": ("description", "details", "narrative", "merchant"),
-    "debit": ("debit", "paid out", "paid_out", "withdrawn", "money out", "money_out"),
-    "credit": ("credit", "paid in", "paid_in", "received", "money in", "money_in"),
+    "description": ("description", "details", "narrative", "narration", "merchant"),
+    "debit": ("debit", "paid out", "paid_out", "withdrawn", "withdrawal", "withdrawal amt", "withdrawalamt", "money out", "money_out"),
+    "credit": ("credit", "paid in", "paid_in", "received", "deposit", "deposit amt", "depositamt", "money in", "money_in"),
     "amount": ("amount", "value"),
-    "balance": ("balance",),
-    "reference": ("reference", "transaction id"),
+    "balance": ("balance", "closing balance", "closingbalance"),
+    "reference": ("reference", "transaction id", "chq ref no"),
 }
 
 
@@ -249,6 +249,7 @@ class StatementSource:
     media_type: str
     size_bytes: int = 0
     sha256: str = ""
+    password: str | None = None
 
 
 @dataclass(slots=True)

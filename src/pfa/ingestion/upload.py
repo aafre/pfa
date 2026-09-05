@@ -30,14 +30,23 @@ from .candidates import (
 from .dialects import HDFC_IN_DELIMITED, detect_adapter
 
 CHUNK_SIZE = 64 * 1024
-SUPPORTED_EXTENSIONS = {".csv", ".pdf", ".txt"}
-DEFAULT_MEDIA_TYPES = {".csv": "text/csv", ".pdf": "application/pdf", ".txt": "text/plain"}
+SUPPORTED_EXTENSIONS = {".csv", ".pdf", ".txt", ".xls"}
+DEFAULT_MEDIA_TYPES = {
+    ".csv": "text/csv",
+    ".pdf": "application/pdf",
+    ".txt": "text/plain",
+    ".xls": "application/vnd.ms-excel",
+}
 PDF_SIGNATURE = b"%PDF-"
+OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 REJECTED_MEDIA_PREFIXES = ("image/",)
 
 
 def stage_upload(
-    file: UploadFile, settings: Settings, content_length: int | None = None
+    file: UploadFile,
+    settings: Settings,
+    content_length: int | None = None,
+    password: str | None = None,
 ) -> StatementSource:
     """Streams the upload to a generated path under settings.upload_dir, hashing as it goes.
 
@@ -51,15 +60,15 @@ def stage_upload(
 
     original_filename = Path(file.filename or "upload").name
     ext = Path(original_filename).suffix.lower()
-    if ext in {".xls", ".xlsx"}:
+    if ext == ".xlsx":
         raise UploadRejected(
             UNSUPPORTED_SPREADSHEET_FORMAT,
-            "Excel statements are not supported; for HDFC, download the Delimited format",
+            "Excel .xlsx statements are not supported; download .xls or Delimited format",
         )
     if ext not in SUPPORTED_EXTENSIONS:
         raise UploadRejected(
             UNSUPPORTED_FILE_TYPE,
-            f"unsupported file type {ext or '(none)'!r}; only .csv, .txt, and .pdf are accepted",
+            f"unsupported file type {ext or '(none)'!r}; only .csv, .txt, .xls, and .pdf are accepted",
         )
     media_type = file.content_type or ""
     # Lowercased: a blocklist that "Image/PNG" walks straight through is not a blocklist.
@@ -98,6 +107,10 @@ def stage_upload(
         if not head.startswith(PDF_SIGNATURE):
             staged_path.unlink(missing_ok=True)
             raise UploadRejected(INVALID_SIGNATURE, "file is not a valid PDF")
+    elif ext == ".xls":
+        if not head.startswith(OLE2_SIGNATURE):
+            staged_path.unlink(missing_ok=True)
+            raise UploadRejected(INVALID_SIGNATURE, "file is not a valid Excel .xls workbook")
     else:
         try:
             staged_path.read_text(encoding="utf-8-sig")
@@ -110,21 +123,7 @@ def stage_upload(
         if ext == ".txt":
             detection = detect_adapter(staged_path, media_type)
             if detection.dialect is not HDFC_IN_DELIMITED:
-                text = staged_path.read_text(encoding="utf-8-sig", errors="ignore")[:100_000]
-                lower = " ".join(text.lower().split())
-                formatted_markers = (
-                    "statement of account" in lower
-                    or "withdrawal amt" in lower
-                    or "deposit amt" in lower
-                    or "chq./ref.no" in lower
-                    or ("value dt" in lower and "closing balance" in lower)
-                )
                 staged_path.unlink(missing_ok=True)
-                if formatted_markers:
-                    raise UploadRejected(
-                        UNSUPPORTED_TEXT_LAYOUT,
-                        "HDFC formatted text is not supported; download the Delimited format",
-                    )
                 raise UploadRejected(
                     UNSUPPORTED_TEXT_FORMAT,
                     "unrecognized text statement; for HDFC, download the Delimited format",
@@ -136,6 +135,7 @@ def stage_upload(
         media_type=media_type or DEFAULT_MEDIA_TYPES[ext],
         size_bytes=total,
         sha256=digest.hexdigest(),
+        password=password,
     )
 
 
@@ -145,4 +145,7 @@ def sweep_upload_dir(settings: Settings) -> None:
         return
     for path in settings.upload_dir.iterdir():
         if path.is_file():
-            path.unlink(missing_ok=True)
+            try:
+                path.unlink(missing_ok=True)
+            except (PermissionError, OSError):
+                pass

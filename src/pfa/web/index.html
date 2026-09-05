@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#16252e" />
     <title>PFA — Personal Finance Agent</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?t=178837" />
   </head>
   <body>
     <div class="app-shell">
@@ -270,6 +270,7 @@
                       <span class="format-pill">PDF with OCR fallback</span>
                       <span class="format-pill">Bank CSV exports</span>
                       <span class="format-pill">HDFC Delimited .txt</span>
+                      <span class="format-pill">Excel .xls workbooks</span>
                     </div>
                   </div>
                 </div>
@@ -279,6 +280,15 @@
                   <div class="progress-details">
                     <strong id="progress-text">Extracting candidates from statement...</strong>
                     <small>Parsing transaction rows and detecting account structure</small>
+                  </div>
+                </div>
+
+                <div class="upload-password-bar" id="upload-password-wrap" style="margin-top: 16px; padding: 20px; background: var(--surface-raised); border: 1px solid var(--amber); border-radius: var(--radius);" hidden>
+                  <strong style="display:block; margin-bottom: 6px; color: var(--ink);">🔒 Statement Password Required</strong>
+                  <p style="font-size: 12px; color: var(--muted); margin-bottom: 12px;">This PDF is encrypted by your bank. Enter your statement password to decrypt it.</p>
+                  <div style="display:flex; gap: 8px;">
+                    <input type="password" id="statement-password-input" class="text-input" placeholder="Enter bank password (e.g. customer ID / DOB)" style="flex:1;" />
+                    <button type="button" class="button-primary" id="unlock-statement-btn">Unlock &amp; Import</button>
                   </div>
                 </div>
               </div>
@@ -305,7 +315,7 @@
                       </select>
                       <button class="button-secondary" type="button" id="save-account-btn">Assign</button>
                     </div>
-                    <details class="new-account-details">
+                    <details class="new-account-details" id="new-account-details">
                       <summary>Create a new account</summary>
                       <div class="account-input-group">
                         <label class="sr-only" for="new-account-name">New account name</label>
@@ -342,7 +352,7 @@
                       <small id="account-help">Account names are labels; PFA binds imports by account ID.</small>
                     </details>
                     <div id="hdfc-legacy-correction" hidden>
-                      <label class="checkbox-label"><input id="mark-hdfc-account" type="checkbox" /> Mark this legacy account as HDFC Bank</label>
+                      <label class="checkbox-label"><input id="mark-hdfc-account" type="checkbox" /> <span id="mark-institution-label">Mark this legacy account as HDFC Bank</span></label>
                     </div>
                   </div>
                 </div>
@@ -377,6 +387,9 @@
                     </button>
                     <button class="filter-tab" type="button" role="tab" data-filter="warning" id="tab-warning">
                       Warnings <span class="tab-badge badge-amber" id="count-warning">0</span>
+                    </button>
+                    <button class="filter-tab" type="button" role="tab" data-filter="error" id="tab-error">
+                      Errors <span class="tab-badge badge-red" id="count-error">0</span>
                     </button>
                     <button class="filter-tab" type="button" role="tab" data-filter="duplicate" id="tab-duplicate">
                       Duplicates <span class="tab-badge badge-neutral" id="count-duplicate">0</span>
@@ -445,6 +458,36 @@
                   </div>
                 </div>
               </div>
+
+              <!-- IMPORT HISTORY -->
+              <section class="panel import-history-panel" id="import-history-section">
+                <div class="panel-header">
+                  <div>
+                    <p class="eyebrow">Audit &amp; Undo</p>
+                    <h2>Import History</h2>
+                  </div>
+                  <button class="button-ghost" type="button" id="refresh-history-btn">Refresh</button>
+                </div>
+                <div class="table-responsive">
+                  <table class="history-table" aria-label="Statement Import History">
+                    <thead>
+                      <tr>
+                        <th scope="col">Statement</th>
+                        <th scope="col">Target Account</th>
+                        <th scope="col">Status</th>
+                        <th scope="col">Imported</th>
+                        <th scope="col">Date</th>
+                        <th scope="col" class="th-right">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody id="import-history-tbody">
+                      <tr>
+                        <td colspan="6" class="history-empty">Loading import history...</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
             </div>
           </section>
 
@@ -626,9 +669,25 @@
       </div>
     </dialog>
 
+    <!-- UNDO CONFIRMATION DIALOG -->
+    <dialog class="evidence-dialog" id="undo-confirm-dialog" aria-labelledby="undo-dialog-title">
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">Confirm Undo</p>
+          <h2 id="undo-dialog-title">Undo Statement Import</h2>
+        </div>
+        <button class="dialog-close" type="button" id="undo-dialog-close-x" aria-label="Cancel">×</button>
+      </div>
+      <p class="dialog-lede" id="undo-dialog-message">Are you sure you want to undo this statement import?</p>
+      <div class="dialog-actions">
+        <button class="button-secondary" type="button" id="undo-dialog-cancel">Cancel</button>
+        <button class="button-destructive" type="button" id="undo-dialog-confirm">Confirm &amp; Remove Rows</button>
+      </div>
+    </dialog>
+
     <!-- TOAST NOTIFICATION -->
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script src="/static/app.js" defer></script>
+    <script src="/static/app.js?t=178837" defer></script>
   </body>
 </html>

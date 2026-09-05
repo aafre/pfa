@@ -100,7 +100,8 @@ def _hdfc_reconciliation(candidates: list[CandidateTransaction]) -> dict[str, An
         "closing_balance_minor": rows[-1][1],
         "currency": "INR",
         "evidence": (
-            f"{max(len(rows) - 1, 0)}/{max(len(rows) - 1, 0)} ordered balance transitions checked"
+            f"{max(len(rows) - 1, 0) - mismatch_count}/{max(len(rows) - 1, 0)} "
+            "ordered balance transitions reconciled"
         ),
     }
 
@@ -114,18 +115,13 @@ def reconcile_candidates(
         return _hdfc_reconciliation(candidates)
 
     coverage_pass = _coverage_pass(candidates)
-    rows: list[tuple[CandidateTransaction, int]] = []
-    for candidate in candidates:
-        if not candidate.included or candidate.duplicate_of is not None:
-            continue
-        balance = _balance_minor(candidate.raw_fields.get("balance", ""), candidate.currency)
-        if balance is None:
-            continue
-        if candidate.signed_amount_minor is None:
-            continue
-        rows.append((candidate, balance))
+    has_any_balance = any(
+        _balance_minor(candidate.raw_fields.get("balance", ""), candidate.currency) is not None
+        for candidate in candidates
+        if candidate.included and candidate.duplicate_of is None
+    )
 
-    if not rows:
+    if not has_any_balance:
         return {
             "arithmetic_integrity": "not_available",
             "coverage_integrity": "pass" if coverage_pass else "incomplete",
@@ -134,20 +130,46 @@ def reconcile_candidates(
             "evidence": "no opening/closing balance column was detected",
         }
 
+    current_movement = 0
+    previous: int | None = None
+    expected: int = 0
+    last_balance: int = 0
     arithmetic_pass = True
-    first_signed = rows[0][0].signed_amount_minor
-    assert first_signed is not None
-    expected = rows[0][1] - (
-        first_signed if account_nature(account_type) == "asset" else -first_signed
-    )
-    previous = expected
-    for candidate, balance in rows:
-        movement = candidate.signed_amount_minor or 0
+    balance_linked_count = 0
+    first_currency = "GBP"
+
+    for candidate in candidates:
+        if not candidate.included or candidate.duplicate_of is not None:
+            continue
+        if candidate.signed_amount_minor is None:
+            continue
+        first_currency = candidate.currency
+        movement = candidate.signed_amount_minor
         if account_nature(account_type) == "liability":
             movement = -movement
-        if previous + movement != balance:
-            arithmetic_pass = False
-        previous = balance
+        current_movement += movement
+        balance = _balance_minor(candidate.raw_fields.get("balance", ""), candidate.currency)
+        if balance is not None:
+            balance_linked_count += 1
+            last_balance = balance
+            if previous is None:
+                expected = balance - current_movement
+                previous = balance
+                current_movement = 0
+            else:
+                if previous + current_movement != balance:
+                    arithmetic_pass = False
+                previous = balance
+                current_movement = 0
+
+    if balance_linked_count == 0:
+        return {
+            "arithmetic_integrity": "not_available",
+            "coverage_integrity": "pass" if coverage_pass else "incomplete",
+            "status": "not available" if coverage_pass else "incomplete",
+            "reconciled": False,
+            "evidence": "no opening/closing balance column was detected",
+        }
 
     arithmetic = "pass" if arithmetic_pass else "mismatch"
     coverage = "pass" if coverage_pass else "incomplete"
@@ -161,7 +183,7 @@ def reconcile_candidates(
         else "mismatch",
         "reconciled": arithmetic_pass and coverage_pass,
         "opening_balance_minor": expected,
-        "closing_balance_minor": rows[-1][1],
-        "currency": rows[0][0].currency,
-        "evidence": f"{len(rows)} balance-linked transaction rows",
+        "closing_balance_minor": last_balance,
+        "currency": first_currency,
+        "evidence": f"{balance_linked_count} balance-linked transaction rows",
     }

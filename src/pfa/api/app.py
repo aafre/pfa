@@ -102,7 +102,7 @@ class NewAccountRequest(BaseModel):
 
 
 class AccountMetadataUpdateRequest(BaseModel):
-    institution: Literal["hdfc_bank"]
+    institution: str = Field(min_length=1, max_length=120)
 
 
 class CandidateIssueResponse(BaseModel):
@@ -425,13 +425,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         new_account_name: str | None = Form(None),  # noqa: B008
         new_account_type: AccountType = Form(AccountType.CURRENT),  # noqa: B008
         new_account_currency: str = Form("GBP"),  # noqa: B008
+        password: str | None = Form(None),  # noqa: B008
     ) -> ImportBatchResponse:
         content_length = request.headers.get("content-length")
         # A header the client controls must not be able to turn a bad request into a 500;
         # an unparseable one just means the size cap falls back to the copy loop.
         declared_size = int(content_length) if content_length and content_length.isdigit() else None
         try:
-            source = stage_upload(file, active_settings, declared_size)
+            source = stage_upload(file, active_settings, declared_size, password=password)
         except UploadRejected as exc:
             status_code = _UPLOAD_ERROR_STATUS.get(exc.code, 422)
             raise HTTPException(
@@ -471,6 +472,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # owns cleanup in that case, so a failed unlink here is not an error.
             with suppress(OSError):
                 source.path.unlink(missing_ok=True)
+
+    @app.get("/imports", response_model=list[ImportBatchResponse])
+    def list_import_batches(
+        limit: int = 50,
+        status: str | None = None,
+    ) -> list[ImportBatchResponse]:
+        engine, services = open_services(active_settings)
+        try:
+            batches = services.uow.import_batches.list(limit=limit, status=status)
+            responses = [_batch_response(batch) for batch in batches]
+            close_services(engine, services)
+            return responses
+        except Exception:
+            close_services(engine, services, False)
+            raise
 
     @app.get("/imports/{batch_id}", response_model=ImportBatchResponse)
     def get_import_batch(batch_id: str) -> ImportBatchResponse:
@@ -639,11 +655,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/transactions", response_model=list[TransactionResponse])
     def transactions(
+        month: str | None = None,
+        account_id: str | None = None,
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
     ) -> list[TransactionResponse]:
         engine, services = open_services(active_settings)
         try:
-            rows = services.uow.transactions.all()[-limit:]
+            rows = services.uow.transactions.all()
+            if month:
+                rows = [
+                    r
+                    for r in rows
+                    if (
+                        hasattr(r.transaction_date, "strftime")
+                        and r.transaction_date.strftime("%Y-%m") == month
+                    )
+                    or str(r.transaction_date).startswith(month)
+                ]
+            if account_id:
+                rows = [r for r in rows if str(r.account_id) == str(account_id)]
+            rows = rows[-limit:]
             return [
                 TransactionResponse(
                     id=row.id,
@@ -915,7 +946,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         engine, services = open_services(active_settings)
         try:
             deterministic = deterministic_answer(
-                services.analytics, services.planning, request.message
+                services.analytics, services.planning, request.message, currency=request.currency
             )
             if deterministic:
                 return {"answer": deterministic}

@@ -119,6 +119,7 @@ function setRoute(route) {
   $("current-view-title").textContent = info.breadcrumb;
 
   if (route === "overview") renderOverview();
+  if (route === "import") renderImportHistory();
   if (route === "categories") renderCategoriesView();
   if (route === "activity") renderActivityView();
   if (route === "ask") renderAskView();
@@ -140,12 +141,13 @@ function showToast(message, isError = false) {
 async function loadMonthData(period) {
   state.month = period;
   try {
+    const curr = state.currency || (state.accounts && state.accounts[0]?.currency) || "GBP";
     const [summary, categories, budgets, goals, txs, accounts] = await Promise.all([
-      getJson(`/analytics/monthly?month=${period}`),
-      getJson(`/analytics/categories?month=${period}`),
+      getJson(`/analytics/monthly?month=${period}&currency=${encodeURIComponent(curr)}`),
+      getJson(`/analytics/categories?month=${period}&currency=${encodeURIComponent(curr)}`),
       getJson(`/budgets?month=${period}`).catch(() => []),
       getJson("/goals").catch(() => []),
-      getJson("/transactions?limit=200").catch(() => []),
+      getJson(`/transactions?month=${period}&limit=200`).catch(() => []),
       getJson("/accounts").catch(() => [])
     ]);
 
@@ -154,12 +156,17 @@ async function loadMonthData(period) {
     state.goals = goals;
     state.transactions = txs;
     state.accounts = accounts;
+    if (accounts.length > 0 && !state.currency) {
+      state.currency = accounts[0].currency;
+    }
     state.source = "live";
     state.loadError = null;
+    updateMonthMenu();
   } catch (error) {
     state.data[period] = { ...EMPTY_MONTH, period };
     state.source = "error";
     state.loadError = error.message || "Could not reach the PFA API";
+    updateMonthMenu();
   }
 
   // Check health
@@ -202,10 +209,18 @@ function renderCurrentRoute() {
   $("nav-tx-count").textContent = state.transactions.length || (state.data[state.month]?.transaction_count || 0);
   if (state.accounts.length > 0) {
     $("active-account-label").textContent = state.accounts[0].name;
-    const knownList = $("destination-account-select");
-    if (knownList) {
-      knownList.innerHTML = `<option value="">Choose an existing account</option>` + state.accounts.map((a) => `<option value="${a.id}">${escapeHtml(a.name)} (${escapeHtml(a.account_type)} · ${escapeHtml(a.currency)})</option>`).join("");
-    }
+  }
+  // Repopulate unconditionally: on a fresh database the list is empty, and leaving the
+  // stale "Choose an existing account" placeholder made Assign look available when it
+  // could never work.
+  const knownList = $("destination-account-select");
+  if (knownList) {
+    const previous = knownList.value;
+    const placeholder = state.accounts.length > 0
+      ? `<option value="">Choose an existing account</option>`
+      : `<option value="">No accounts yet — create one below</option>`;
+    knownList.innerHTML = placeholder + state.accounts.map((a) => `<option value="${a.id}">${escapeHtml(a.name)} (${escapeHtml(a.account_type)} · ${escapeHtml(a.currency)})</option>`).join("");
+    knownList.value = previous;
   }
 
   setRoute(state.route);
@@ -252,6 +267,15 @@ function renderAuditList(data, previous) {
   const current = Object.fromEntries((data.categories || []).map((c) => [c.category, Number(c.total_minor || c.amount_minor || 0)]));
   const prior = Object.fromEntries((previous.categories || []).map((c) => [c.category, Number(c.total_minor || c.amount_minor || 0)]));
 
+  const totalCatSpend = (data.categories || []).reduce((s, c) => s + Number(c.total_minor || c.amount_minor || 0), 0);
+  if (Number(data.spending_minor || 0) === 0 && totalCatSpend === 0) {
+    $("audit-count").textContent = "00";
+    $("audit-title").textContent = "No spending recorded for this month.";
+    $("review-copy").innerHTML = `No transactions were recorded in <strong>${escapeHtml(monthName(state.month))}</strong>. Upload a statement to analyze your cashflow and category drivers.`;
+    $("audit-list").innerHTML = `<div style="padding: 24px; text-align: center; color: var(--muted); font-size: 13px;">No category movement to report for this period.</div>`;
+    return;
+  }
+
   const changes = Object.keys(current)
     .map((cat) => ({ category: cat, amount: current[cat], delta: current[cat] - (prior[cat] || 0) }))
     .filter((c) => c.delta > 0)
@@ -260,11 +284,23 @@ function renderAuditList(data, previous) {
 
   const rows = changes.length > 0 ? changes : Object.keys(current).sort((a, b) => current[b] - current[a]).slice(0, 2).map((c) => ({ category: c, amount: current[c], delta: 0 }));
 
+  if (rows.length === 0) {
+    $("audit-count").textContent = "00";
+    $("audit-title").textContent = "No major spending shifts.";
+    $("review-copy").innerHTML = `Spending in <strong>${escapeHtml(monthName(state.month))}</strong> was <strong>${formatMoney(data.spending_minor, data.currency, true)}</strong>.`;
+    $("audit-list").innerHTML = `<div style="padding: 24px; text-align: center; color: var(--muted); font-size: 13px;">No notable category changes compared to prior period.</div>`;
+    return;
+  }
+
   $("audit-count").textContent = String(rows.length).padStart(2, "0");
   $("audit-title").textContent = rows.length === 1 ? "One major change stands out this month." : "Most of the spending movement is in two places.";
 
   const delta = Math.abs(data.spending_minor - previous.spending_minor);
-  $("review-copy").innerHTML = `Spending moved ${data.spending_minor >= previous.spending_minor ? "up" : "down"} <strong>${formatMoney(delta, data.currency, true)}</strong> from ${escapeHtml(monthName(previous.period || monthShift(state.month, -1)))}. Deterministic SQL evidence highlights the primary category drivers below.`;
+  if (delta === 0) {
+    $("review-copy").innerHTML = `Spending remained unchanged at <strong>${formatMoney(data.spending_minor, data.currency, true)}</strong> compared to ${escapeHtml(monthName(previous.period || monthShift(state.month, -1)))}. Deterministic SQL evidence highlights the primary category drivers below.`;
+  } else {
+    $("review-copy").innerHTML = `Spending moved ${data.spending_minor >= previous.spending_minor ? "up" : "down"} <strong>${formatMoney(delta, data.currency, true)}</strong> from ${escapeHtml(monthName(previous.period || monthShift(state.month, -1)))}. Deterministic SQL evidence highlights the primary category drivers below.`;
+  }
 
   $("audit-list").innerHTML = rows.map((item, idx) => {
     const isNew = !prior[item.category];
@@ -388,31 +424,59 @@ function setupUploadHandlers() {
   $("select-all-candidates").addEventListener("click", () => bulkToggleCandidates(true));
   $("deselect-all-candidates").addEventListener("click", () => bulkToggleCandidates(false));
 
+  // Password Unlock Action
+  $("unlock-statement-btn")?.addEventListener("click", () => {
+    const pwd = $("statement-password-input")?.value;
+    if (lastUploadedFile && pwd) {
+      handleStatementUpload(lastUploadedFile, pwd);
+    }
+  });
+  $("statement-password-input")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      const pwd = $("statement-password-input")?.value;
+      if (lastUploadedFile && pwd) {
+        handleStatementUpload(lastUploadedFile, pwd);
+      }
+    }
+  });
+
   // Destination Account Assign: existing accounts use stable IDs; new accounts are drafts
   // and are only created with their transactions when the import is committed.
   $("save-account-btn").addEventListener("click", async () => {
     const selected = $("destination-account-select").value;
     const newName = $("new-account-name").value.trim();
-    if ((!selected && !newName) || !state.activeBatch) return;
+    if (!state.activeBatch) {
+      setAccountHint("Upload a statement before assigning an account.", true);
+      return;
+    }
+    if (!selected && !newName) {
+      // Used to return silently, which read as "the button is broken".
+      setAccountHint("Choose an existing account, or name the new account you want to create.", true);
+      $("new-account-name").focus();
+      return;
+    }
     const isHdfc = state.activeBatch.adapter_id === "hdfc_in_delimited_v1";
+    const detectedInst = state.activeBatch.detected_institution || (isHdfc ? "hdfc_bank" : null);
     const opening = $("new-account-opening-balance")?.value;
+    const isMarkChecked = $("mark-hdfc-account")?.checked;
+    const currencyVal = $("new-account-currency")?.value || (isHdfc ? "INR" : (state.activeBatch.detected_currency || "GBP"));
     const body = selected
       ? {
           destination_account_id: Number(selected),
-          ...(isHdfc && $("mark-hdfc-account")?.checked
-            ? { account_metadata_update: { institution: "hdfc_bank" } }
+          ...(detectedInst && isMarkChecked
+            ? { account_metadata_update: { institution: detectedInst } }
             : {})
         }
       : {
           new_account: {
             name: newName,
             account_type: $("new-account-type").value,
-            currency: isHdfc ? "INR" : (state.activeBatch.detected_currency || "GBP"),
-            institution: isHdfc ? "hdfc_bank" : null,
-            currency_confirmed: isHdfc ? $("confirm-account-currency").checked : false,
-            opening_balance_minor: isHdfc && opening ? Math.round(Number(opening) * 100) : 0,
-            opening_balance_as_of: isHdfc ? $("new-account-opening-as-of")?.value || null : null,
-            opening_balance_confirmed: isHdfc ? $("confirm-opening-balance").checked : false
+            currency: currencyVal,
+            institution: detectedInst || null,
+            currency_confirmed: $("confirm-account-currency")?.checked || false,
+            opening_balance_minor: opening ? Math.round(Number(opening) * 100) : 0,
+            opening_balance_as_of: $("new-account-opening-as-of")?.value || null,
+            opening_balance_confirmed: $("confirm-opening-balance")?.checked || false
           }
         };
     try {
@@ -423,8 +487,19 @@ function setupUploadHandlers() {
       });
       state.activeBatch = patched;
       renderBatchInspector(patched);
-      showToast(`Assigned ${selected ? "the selected account" : `account "${newName}"`} to statement batch.`);
+      // A 200 does not mean the draft was accepted: the batch comes back `blocked` with
+      // the unmet confirmations. Announcing success there hid the real reason.
+      const blocking = (patched.issues || []).filter((i) => i.severity === "error");
+      if (patched.status === "blocked" || blocking.length > 0) {
+        const reasons = blocking.map((i) => `${issueLabel(i)} — ${i.message}`);
+        setAccountHint(reasons.join(" · ") || "This account draft was rejected.", true);
+        showToast(blocking[0]?.message || "Account draft rejected", true);
+      } else {
+        setAccountHint("Account assigned. Review the candidates, then commit.", false);
+        showToast(`Assigned ${selected ? "the selected account" : `account "${newName}"`} to statement batch.`);
+      }
     } catch (err) {
+      setAccountHint(err.message, true);
       showToast(err.message, true);
     }
   });
@@ -439,6 +514,7 @@ function setupUploadHandlers() {
       $("upload-card").hidden = false;
       $("nav-import-status").hidden = true;
       showToast("Statement batch discarded.");
+      renderImportHistory();
     } catch (err) {
       showToast(err.message, true);
     }
@@ -455,8 +531,9 @@ function setupUploadHandlers() {
       $("nav-import-status").hidden = true;
       $("success-message").textContent = `${committed.counts.imported} transactions committed directly to your ledger.`;
       showToast(`Successfully imported ${committed.counts.imported} transactions!`);
-      // Refresh current month data
+      // Refresh current month data & import history
       loadMonthData(state.month);
+      renderImportHistory();
     } catch (err) {
       showToast(err.message, true);
     }
@@ -464,29 +541,11 @@ function setupUploadHandlers() {
 
   $("undo-import-btn")?.addEventListener("click", async () => {
     if (!state.activeBatch) return;
-    try {
-      await apiRequest(`/imports/${state.activeBatch.id}/undo`, { method: "POST" });
-      showToast("Import undone; account was kept.");
-      $("batch-success-card").hidden = true;
-      $("upload-card").hidden = false;
-      state.activeBatch = null;
-      loadMonthData(state.month);
-    } catch (err) {
-      if (err.data?.detail?.code === "UNDO_REQUIRES_CONFIRMATION" && window.confirm(err.message)) {
-        await apiRequest(`/imports/${state.activeBatch.id}/undo`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ confirm_changed: true })
-        });
-        showToast("Import undone; edited rows were removed.");
-        $("batch-success-card").hidden = true;
-        $("upload-card").hidden = false;
-        state.activeBatch = null;
-        loadMonthData(state.month);
-      } else {
-        showToast(err.message, true);
-      }
-    }
+    await triggerUndoBatch(state.activeBatch.id);
+  });
+
+  $("refresh-history-btn")?.addEventListener("click", () => {
+    renderImportHistory();
   });
 
   // Amount Sign Convention selector
@@ -520,15 +579,133 @@ function setupUploadHandlers() {
     $("batch-success-card").hidden = true;
     $("upload-card").hidden = false;
     fileInput.value = "";
+    renderImportHistory();
   });
 }
 
-async function handleStatementUpload(file) {
+async function triggerUndoBatch(batchId) {
+  try {
+    await apiRequest(`/imports/${batchId}/undo`, { method: "POST" });
+    showToast("Import undone; transactions removed.");
+    if (state.activeBatch && state.activeBatch.id === batchId) {
+      $("batch-success-card").hidden = true;
+      $("upload-card").hidden = false;
+      state.activeBatch = null;
+    }
+    loadMonthData(state.month);
+    renderImportHistory();
+  } catch (err) {
+    if (err.data?.detail?.code === "UNDO_REQUIRES_CONFIRMATION") {
+      const confirmed = await promptUndoConfirmation(err.message);
+      if (confirmed) {
+        try {
+          await apiRequest(`/imports/${batchId}/undo`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ confirm_changed: true })
+          });
+          showToast("Import undone; edited rows were removed.");
+          if (state.activeBatch && state.activeBatch.id === batchId) {
+            $("batch-success-card").hidden = true;
+            $("upload-card").hidden = false;
+            state.activeBatch = null;
+          }
+          loadMonthData(state.month);
+          renderImportHistory();
+        } catch (innerErr) {
+          showToast(innerErr.message, true);
+        }
+      }
+    } else {
+      showToast(err.message, true);
+    }
+  }
+}
+
+function promptUndoConfirmation(message) {
+  const dialog = $("undo-confirm-dialog");
+  if (!dialog || typeof dialog.showModal !== "function") {
+    return Promise.resolve(window.confirm(message));
+  }
+  $("undo-dialog-message").textContent = message || "Are you sure you want to undo this statement import?";
+  dialog.showModal();
+  return new Promise((resolve) => {
+    const handleConfirm = () => {
+      cleanup();
+      dialog.close();
+      resolve(true);
+    };
+    const handleCancel = () => {
+      cleanup();
+      dialog.close();
+      resolve(false);
+    };
+    function cleanup() {
+      $("undo-dialog-confirm")?.removeEventListener("click", handleConfirm);
+      $("undo-dialog-cancel")?.removeEventListener("click", handleCancel);
+      $("undo-dialog-close-x")?.removeEventListener("click", handleCancel);
+    }
+    $("undo-dialog-confirm")?.addEventListener("click", handleConfirm);
+    $("undo-dialog-cancel")?.addEventListener("click", handleCancel);
+    $("undo-dialog-close-x")?.addEventListener("click", handleCancel);
+  });
+}
+
+async function renderImportHistory() {
+  const tbody = $("import-history-tbody");
+  if (!tbody) return;
+  try {
+    const batches = await getJson("/imports?limit=20");
+    if (!batches || batches.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" class="history-empty">No statement imports recorded yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = batches.map((b) => {
+      const date = b.committed_at || b.created_at;
+      const formattedDate = date ? new Date(date).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
+      const statusClass = b.status === "committed" ? "status-committed" : (b.status === "undone" ? "status-undone" : (b.status === "blocked" ? "status-blocked" : "status-warn"));
+      const importedCount = b.counts?.imported || (b.committed_transaction_ids ? b.committed_transaction_ids.length : 0);
+      const undoBtn = b.status === "committed"
+        ? `<button class="button-secondary btn-undo-batch" type="button" data-undo-batch-id="${escapeHtml(b.id)}">Undo</button>`
+        : `<span class="muted">—</span>`;
+      return `
+        <tr>
+          <td><strong>${escapeHtml(b.original_filename)}</strong></td>
+          <td>${escapeHtml(b.destination_account || "—")}</td>
+          <td><span class="status-pill ${statusClass}">${escapeHtml(b.status)}</span></td>
+          <td>${importedCount} txs</td>
+          <td><small class="muted">${escapeHtml(formattedDate)}</small></td>
+          <td class="th-right">${undoBtn}</td>
+        </tr>
+      `;
+    }).join("");
+
+    tbody.querySelectorAll("[data-undo-batch-id]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const batchId = btn.dataset.undoBatchId;
+        if (batchId) {
+          await triggerUndoBatch(batchId);
+        }
+      });
+    });
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="6" class="history-empty">Failed to load import history: ${escapeHtml(err.message)}</td></tr>`;
+  }
+}
+
+let lastUploadedFile = null;
+
+async function handleStatementUpload(file, password = null) {
+  lastUploadedFile = file;
   $("upload-progress").hidden = false;
+  if ($("upload-password-wrap")) $("upload-password-wrap").hidden = true;
   $("progress-text").textContent = `Parsing ${file.name} (detecting table format & transactions)...`;
 
   const formData = new FormData();
   formData.append("file", file);
+  if (password) {
+    formData.append("password", password);
+  }
 
   try {
     const batch = await apiRequest("/imports/preview", {
@@ -536,8 +713,23 @@ async function handleStatementUpload(file) {
       body: formData
     });
 
+    const isEncrypted = (batch.issues || []).some(
+      (i) => i.code === "PDF_PASSWORD_REQUIRED" || i.code === "PDF_ENCRYPTED"
+    );
+
+    if (isEncrypted) {
+      $("upload-progress").hidden = true;
+      if ($("upload-password-wrap")) {
+        $("upload-password-wrap").hidden = false;
+        $("statement-password-input")?.focus();
+      }
+      showToast("This statement is encrypted with a password. Please enter your password.", true);
+      return;
+    }
+
     state.activeBatch = batch;
     $("upload-progress").hidden = true;
+    if ($("upload-password-wrap")) $("upload-password-wrap").hidden = true;
     $("upload-card").hidden = true;
     $("batch-success-card").hidden = true;
     $("batch-inspector").hidden = false;
@@ -545,10 +737,31 @@ async function handleStatementUpload(file) {
 
     renderBatchInspector(batch);
     showToast(`Parsed ${batch.counts.total} candidates from ${file.name}`);
+    renderImportHistory();
   } catch (err) {
     $("upload-progress").hidden = true;
-    showToast(err.message || "Failed to parse statement upload", true);
+    if (err.data?.detail?.code === "PDF_PASSWORD_REQUIRED" || err.data?.detail?.code === "PDF_ENCRYPTED") {
+      if ($("upload-password-wrap")) {
+        $("upload-password-wrap").hidden = false;
+        $("statement-password-input")?.focus();
+      }
+      showToast("This statement is encrypted with a password. Please enter your password.", true);
+    } else {
+      showToast(err.message || "Failed to parse statement upload", true);
+    }
   }
+}
+
+const ACCOUNT_HELP_DEFAULT = "Account names are labels; PFA binds imports by account ID.";
+
+// The account step lives inside a <details>. Saying anything there is pointless while it
+// is collapsed, so every hint opens it.
+function setAccountHint(message, isError) {
+  const help = $("account-help");
+  if (!help) return;
+  help.textContent = message || ACCOUNT_HELP_DEFAULT;
+  help.classList.toggle("is-error", Boolean(isError));
+  if (message) $("new-account-details").open = true;
 }
 
 function renderBatchInspector(batch) {
@@ -566,6 +779,10 @@ function renderBatchInspector(batch) {
   $("new-account-name").value = batch.new_account?.name || "";
   $("new-account-type").value = batch.new_account?.account_type || (isHdfc ? "current" : "current");
   renderHdfcBinding(batch);
+  setAccountHint("", false);
+  // A required step hidden behind a closed disclosure reads as a broken button. Open it
+  // whenever this batch cannot be committed without creating an account.
+  $("new-account-details").open = !batch.destination_account_id && (isHdfc || state.accounts.length === 0);
 
   const semantic = batch.semantic_totals || {};
   $("batch-semantic-summary").innerHTML = `
@@ -584,6 +801,10 @@ function renderBatchInspector(batch) {
   updateBatchCounts(batch);
   renderCandidatesTable();
 
+  renderBatchIssues(batch);
+}
+
+function renderBatchIssues(batch) {
   if (batch.issues && batch.issues.length > 0) {
     $("batch-issues-alert").hidden = false;
     $("batch-issues-content").innerHTML = batch.issues.map((i) => `<div><strong>${escapeHtml(issueLabel(i))}:</strong> ${escapeHtml(i.message)}</div>`).join("");
@@ -592,18 +813,54 @@ function renderBatchInspector(batch) {
   }
 }
 
+function formatInstitutionName(institution) {
+  if (!institution) return "";
+  const lower = institution.toLowerCase();
+  if (lower === "hdfc_bank" || lower === "hdfc") return "HDFC Bank";
+  if (lower === "amex" || lower === "american express") return "American Express";
+  if (lower === "hsbc") return "HSBC";
+  return institution;
+}
+
 function renderHdfcBinding(batch) {
+  state.activeBatch = batch;
+  $("batch-inspector").hidden = false;
+  $("upload-card").hidden = true;
+  $("batch-success-card").hidden = true;
+
+  // Header info
+  $("batch-id-tag").textContent = `#${batch.id}`;
+  $("batch-filename").textContent = batch.original_filename;
+  $("batch-meta-info").textContent = `${batch.media_type} · ${_bytes(batch.size_bytes)} · Extractor: ${batch.extractor || "standard"}`;
+
   const isHdfc = batch.adapter_id === "hdfc_in_delimited_v1";
   const fields = $("hdfc-account-fields");
   const correction = $("hdfc-legacy-correction");
-  if (!fields || !correction) return;
-  fields.hidden = !isHdfc;
-  correction.hidden = !isHdfc || !batch.destination_account_id ||
-    Boolean(state.accounts.find((account) => account.id === batch.destination_account_id)?.institution);
-  if (!isHdfc) return;
+  const detectedInst = batch.detected_institution || (isHdfc ? "hdfc_bank" : null);
 
-  $("new-account-currency").value = batch.suggested_currency || "INR";
-  $("new-account-institution").value = "hdfc_bank";
+  if (fields) {
+    fields.hidden = false;
+  }
+  if (correction) {
+    const selectedAcc = state.accounts.find((account) => account.id === batch.destination_account_id);
+    correction.hidden = !detectedInst || !batch.destination_account_id || Boolean(selectedAcc?.institution);
+    const labelEl = $("mark-institution-label");
+    if (labelEl && detectedInst) {
+      labelEl.textContent = `Mark this legacy account as ${formatInstitutionName(detectedInst)}`;
+    }
+  }
+
+  const type = $("new-account-type");
+  if (type) {
+    Array.from(type.options).forEach((option) => {
+      option.hidden = isHdfc && option.value !== "current" && option.value !== "savings";
+    });
+  }
+
+  const currencyVal = batch.suggested_currency || (isHdfc ? "INR" : (batch.detected_currency || "GBP"));
+  const instVal = detectedInst || "";
+  $("new-account-currency").value = currencyVal;
+  $("new-account-institution").value = formatInstitutionName(instVal) || instVal;
   const draft = batch.new_account || {};
   $("confirm-account-currency").checked = Boolean(draft.currency_confirmed);
   $("confirm-opening-balance").checked = Boolean(draft.opening_balance_confirmed);
@@ -616,11 +873,7 @@ function renderHdfcBinding(batch) {
     $("new-account-opening-balance").value = draft.opening_balance_minor === undefined ? "" : (Number(draft.opening_balance_minor) / 100).toFixed(2);
     $("new-account-opening-as-of").value = draft.opening_balance_as_of || "";
   }
-  const type = $("new-account-type");
-  if (type) {
-    type.innerHTML = `<option value="current">Current account</option><option value="savings">Savings</option>`;
-    type.value = draft.account_type || type.value || "current";
-  }
+  type.value = draft.account_type || (type.value === "current" || type.value === "savings" ? type.value : "current");
 }
 
 function renderReconciliation(batch) {
@@ -629,16 +882,17 @@ function renderReconciliation(batch) {
   if (!target || !result) return;
   const status = result.status || "not available";
   const evidence = result.evidence || "No balance evidence available";
-  const transitions = result.checked_transition_count === undefined ? "" : ` · ${result.checked_transition_count} transitions checked`;
-  target.innerHTML = `<strong>Reconciliation: ${escapeHtml(status)}</strong><span>${escapeHtml(evidence)}${escapeHtml(transitions)}</span>`;
+  // The evidence string already names the transition counts; appending them repeated it.
+  target.innerHTML = `<strong>Reconciliation: ${escapeHtml(status)}</strong><span>${escapeHtml(evidence)}</span>`;
 }
 
 function issueLabel(issue) {
   const labels = {
     ACCOUNT_REQUIRED: "Choose a compatible account",
+    INVALID_ACCOUNT_DRAFT: "The new account still needs confirmation",
     ACCOUNT_TYPE_MISMATCH: "Account type does not match",
     ACCOUNT_CURRENCY_MISMATCH: "Currency confirmation needed",
-    ACCOUNT_INSTITUTION_REQUIRED: "Confirm this account belongs to HDFC Bank",
+    ACCOUNT_INSTITUTION_REQUIRED: "Confirm account belongs to statement institution",
     ACCOUNT_INSTITUTION_MISMATCH: "The selected account belongs to another institution",
     BALANCE_RECONCILIATION_FAILED: "Statement balance check failed",
     RECONCILIATION_INCOMPLETE: "All statement rows must be included",
@@ -685,9 +939,13 @@ function updateBatchCounts(batch) {
   $("count-duplicate").textContent = batch.counts.duplicate || 0;
   $("count-excluded").textContent = batch.counts.excluded || 0;
 
+  const candidates = batch.candidates || [];
+  const errorCount = candidates.filter((c) => c.issues && c.issues.some((i) => i.severity === "error")).length;
+  const countErrorEl = $("count-error");
+  if (countErrorEl) countErrorEl.textContent = errorCount;
+
   const validToCommit = (batch.counts.valid || 0);
   const duplicateOnlyCommit = (batch.counts.duplicate || 0) > 0 && batch.reconciliation?.status === "reconciled";
-  const candidates = batch.candidates || [];
 
   // Check for blocking errors on included candidates
   const batchErrors = (batch.issues || []).filter((i) => i.severity === "error");
@@ -732,7 +990,8 @@ function renderCandidatesTable() {
   const filtered = candidates.filter((c) => {
     if (filter === "all") return true;
     if (filter === "valid") return c.included && (!c.issues || c.issues.length === 0);
-    if (filter === "warning") return c.issues && c.issues.length > 0;
+    if (filter === "warning") return c.issues && c.issues.some((i) => i.severity === "warning");
+    if (filter === "error") return c.issues && c.issues.some((i) => i.severity === "error");
     if (filter === "duplicate") return c.duplicate_of !== null;
     if (filter === "excluded") return !c.included;
     return true;
@@ -802,6 +1061,10 @@ async function toggleCandidateInclusion(candidateId, included) {
     });
     state.activeBatch = patched;
     updateBatchCounts(patched);
+    // Excluding a row changes reconciliation coverage. Without these the panel kept
+    // claiming "reconciled" while the server had already flagged RECONCILIATION_INCOMPLETE.
+    renderReconciliation(patched);
+    renderBatchIssues(patched);
     renderCandidatesTable();
   } catch (err) {
     showToast(err.message, true);
@@ -819,6 +1082,8 @@ async function bulkToggleCandidates(includeAll) {
     });
     state.activeBatch = patched;
     updateBatchCounts(patched);
+    renderReconciliation(patched);
+    renderBatchIssues(patched);
     renderCandidatesTable();
     showToast(includeAll ? "Included all candidates" : "Excluded all candidates");
   } catch (err) {
@@ -1034,10 +1299,11 @@ async function submitQuestion(question) {
   stream.scrollTop = stream.scrollHeight;
 
   try {
+    const curr = state.currency || (state.data[state.month]?.currency) || "GBP";
     const res = await apiRequest("/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: question })
+      body: JSON.stringify({ message: question, currency: curr })
     });
 
     loadingEl.remove();
@@ -1149,7 +1415,20 @@ function renderAskView() {
 // MONTH NAVIGATION MENU
 function updateMonthMenu() {
   const menu = $("month-menu");
-  const periods = [state.month, monthShift(state.month, -1), monthShift(state.month, -2)];
+  const monthSet = new Set();
+  if (state.month) monthSet.add(state.month);
+  (state.transactions || []).forEach((t) => {
+    if (t.date && t.date.length >= 7) {
+      monthSet.add(t.date.slice(0, 7));
+    }
+  });
+  const now = new Date();
+  for (let i = 0; i < 24; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const mStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    monthSet.add(mStr);
+  }
+  const periods = Array.from(monthSet).sort().reverse();
   menu.innerHTML = periods.map((p) => `
     <button class="month-option" type="button" role="option" data-period="${p}" aria-selected="${p === state.month}">
       ${monthName(p)}
@@ -1161,6 +1440,7 @@ function setupMonthControls() {
   const menu = $("month-menu");
   $("month-current").addEventListener("click", (e) => {
     e.stopPropagation();
+    updateMonthMenu();
     const open = !menu.hidden;
     menu.hidden = open;
     $("month-current").setAttribute("aria-expanded", String(!open));

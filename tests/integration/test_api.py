@@ -93,3 +93,41 @@ def test_api_fx_rates_endpoints(tmp_path) -> None:
         rates = get_resp.json()
         assert len(rates) == 1
         assert rates[0]["quote_currency"] == "INR"
+
+
+def test_transactions_month_filter_and_chat_currency(tmp_path) -> None:
+    csv_aug = tmp_path / "aug.csv"
+    csv_aug.write_text(
+        "date,description,amount,kind,category\n2026-08-01,Salary,1000,income,\n2026-08-02,Rent,-400,expense,housing\n2026-07-15,Past,100,income,\n"
+    )
+    database_url = f"sqlite:///{tmp_path / 'pfa.db'}"
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "head")
+    app = create_app(Settings(database_url=database_url))
+    with TestClient(app) as client:
+        import_resp = client.post("/imports", json={"path": str(csv_aug)})
+        assert import_resp.status_code == 200
+
+        # /transactions with month filter
+        tx_aug = client.get("/transactions?month=2026-08")
+        assert tx_aug.status_code == 200
+        assert len(tx_aug.json()) == 2
+        assert all(r["date"].startswith("2026-08") for r in tx_aug.json())
+
+        tx_jul = client.get("/transactions?month=2026-07")
+        assert tx_jul.status_code == 200
+        assert len(tx_jul.json()) == 1
+
+        tx_jun = client.get("/transactions?month=2026-06")
+        assert tx_jun.status_code == 200
+        assert len(tx_jun.json()) == 0
+
+        # /chat respects currency
+        chat_resp = client.post(
+            "/chat",
+            json={"message": "how much did I spend in August?", "currency": "INR"},
+        )
+        assert chat_resp.status_code == 200
+        assert "INR" in chat_resp.json()["answer"]
+

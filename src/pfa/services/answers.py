@@ -31,8 +31,8 @@ _MONTHS = {
 _CATEGORY_ALIASES = {item.value.replace("_", " "): item.value for item in SpendingCategory}
 
 
-def _amount(minor: int) -> str:
-    return f"GBP {Money(minor).to_major():,.2f}"
+def _amount(minor: int, currency: str = "GBP") -> str:
+    return f"{currency} {Money(minor, currency).to_major():,.2f}"
 
 
 def _period_for_name(analytics: AnalyticsService, name: str) -> date | None:
@@ -42,7 +42,10 @@ def _period_for_name(analytics: AnalyticsService, name: str) -> date | None:
 
 
 def deterministic_answer(
-    analytics: AnalyticsService, planning: PlanningService, question: str
+    analytics: AnalyticsService,
+    planning: PlanningService,
+    question: str,
+    currency: str = "GBP",
 ) -> str | None:
     """Answer common factual intents without asking a model to choose numeric parameters."""
     lower = question.lower()
@@ -61,18 +64,18 @@ def deterministic_answer(
                 total = next(
                     (
                         item.total_minor
-                        for item in analytics.category_spending(period)
+                        for item in analytics.category_spending(period, currency=currency)
                         if item.category == category
                     ),
                     0,
                 )
-                return f"{category} spending in {period.strftime('%Y-%m')} was {_amount(total)}."
+                return f"{category} spending in {period.strftime('%Y-%m')} was {_amount(total, currency)}."
     month_name = next((name for name in _MONTHS if re.search(rf"\b{name}\b", lower)), None)
-    if month_name and any(word in lower for word in ("spending", "spent", "estimate")):
+    if month_name and any(word in lower for word in ("spending", "spend", "spent", "estimate")):
         period = _period_for_name(analytics, month_name)
         if period:
-            summary = analytics.monthly_summary(period)
-            return f"Total spending in {summary.period} was {_amount(summary.spending_minor)}."
+            summary = analytics.monthly_summary(period, currency=currency)
+            return f"Total spending in {summary.period} was {_amount(summary.spending_minor, currency)}."
     if "categories" in lower and "increased" in lower:
         rows = analytics.transactions.all()
         if rows:
@@ -90,7 +93,7 @@ def deterministic_answer(
                     "No category increased from the first to the last of the latest three months."
                 )
             return "Category increases over the latest three months: " + "; ".join(
-                f"{category} +{_amount(delta)}" for category, delta in increases
+                f"{category} +{_amount(delta, currency)}" for category, delta in increases
             )
     if "savings rate" in lower:
         rows = analytics.transactions.all()
@@ -107,7 +110,7 @@ def deterministic_answer(
                     cursor = (cursor.replace(day=1) - timedelta(days=1)).replace(day=1)
             rate_points: list[str] = []
             while cursor <= end and len(rate_points) < 24:
-                summary = analytics.monthly_summary(cursor)
+                summary = analytics.monthly_summary(cursor, currency=currency)
                 rate_points.append(f"{summary.period}: {summary.savings_rate_percent:.2f}%")
                 month = cursor.month % 12 + 1
                 year_cursor = cursor.year + (1 if cursor.month == 12 else 0)
@@ -118,7 +121,7 @@ def deterministic_answer(
         if not goals:
             return "No active financial goals are recorded."
         return "Active goals: " + "; ".join(
-            f"{goal.name}: {_amount(goal.current_minor)} of {_amount(goal.target_minor)} "
+            f"{goal.name}: {_amount(goal.current_minor, currency)} of {_amount(goal.target_minor, currency)} "
             f"({goal.progress_percent:.2f}%)"
             for goal in goals
         )
@@ -130,13 +133,13 @@ def deterministic_answer(
                 _period_for_name(analytics, names[1]),
             )
             if current and previous:
-                comparison = analytics.compare_periods(current, previous)
+                comparison = analytics.compare_periods(current, previous, currency=currency)
                 current_categories = {
-                    item.category: item.total_minor for item in analytics.category_spending(current)
+                    item.category: item.total_minor for item in analytics.category_spending(current, currency=currency)
                 }
                 previous_categories = {
                     item.category: item.total_minor
-                    for item in analytics.category_spending(previous)
+                    for item in analytics.category_spending(previous, currency=currency)
                 }
                 increases = sorted(
                     (
@@ -147,39 +150,39 @@ def deterministic_answer(
                     key=lambda item: -item[1],
                 )[:3]
                 reasons = (
-                    "; ".join(f"{category} +{_amount(delta)}" for category, delta in increases)
+                    "; ".join(f"{category} +{_amount(delta, currency)}" for category, delta in increases)
                     or "no category increased"
                 )
                 delta = comparison.current.spending_minor - comparison.previous.spending_minor
                 direction = "increased" if delta >= 0 else "decreased"
                 return (
-                    f"Spending {direction} from {_amount(comparison.previous.spending_minor)} "
+                    f"Spending {direction} from {_amount(comparison.previous.spending_minor, currency)} "
                     f"in {comparison.previous.period} to "
-                    f"{_amount(comparison.current.spending_minor)} "
+                    f"{_amount(comparison.current.spending_minor, currency)} "
                     f"in {comparison.current.period}. Main changes: {reasons}."
                 )
     if "recurring" in lower or "subscriptions" in lower:
-        recurring = analytics.recurring_payments()
+        recurring = analytics.recurring_payments(currency=currency)
         if not recurring:
             return "No likely recurring payments found in the available transaction history."
         return (
             "Likely recurring payments: "
             + "; ".join(
                 f"{item['merchant']} ({item['cadence']}, "
-                f"{_amount(int(str(item['average_amount_minor'])))})"
+                f"{_amount(int(str(item['average_amount_minor'])), currency)})"
                 for item in recurring
             )
             + "."
         )
     if "afford" in lower:
-        match = re.search(r"(?:\u00a3|gbp)\s*([\d,]+(?:\.\d{1,2})?)", lower)
+        match = re.search(r"(?:\u00a3|gbp|rs\.?|inr|\$|usd)\s*([\d,]+(?:\.\d{1,2})?)", lower)
         if match:
-            cost = Money.from_major(match.group(1).replace(",", "")).minor
+            cost = Money.from_major(match.group(1).replace(",", ""), currency).minor
             result = planning.simulate_purchase(cost)
             return (
                 f"Scenario result: projected cash is "
-                f"{_amount(result.projected_month_end_cash_minor)} versus "
-                f"baseline {_amount(result.baseline_month_end_cash_minor)}. "
+                f"{_amount(result.projected_month_end_cash_minor, currency)} versus "
+                f"baseline {_amount(result.baseline_month_end_cash_minor, currency)}. "
                 f"Affordable under the stated model: {result.affordable}."
             )
     return None

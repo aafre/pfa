@@ -8,15 +8,16 @@ from pfa.ai.deps import FinanceDependencies
 from pfa.domain.money import Money
 
 
-def display_money_fields(value: object) -> object:
+def display_money_fields(value: object, default_currency: str = "GBP") -> object:
     if isinstance(value, list):
-        return [display_money_fields(item) for item in value]
+        return [display_money_fields(item, default_currency) for item in value]
     if not isinstance(value, dict):
         return value
-    result = {key: display_money_fields(item) for key, item in value.items()}
+    result = {key: display_money_fields(item, default_currency) for key, item in value.items()}
+    curr = str(result.get("currency") or default_currency)
     for key, item in value.items():
         if key.endswith("_minor") and isinstance(item, int):
-            result[f"{key.removesuffix('_minor')}_display"] = f"GBP {Money(item).to_major():,.2f}"
+            result[f"{key.removesuffix('_minor')}_display"] = f"{curr} {Money(item, curr).to_major():,.2f}"
     return result
 
 
