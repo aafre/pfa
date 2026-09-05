@@ -140,18 +140,31 @@ function showToast(message, isError = false) {
 // LOAD DATA
 async function loadMonthData(period) {
   state.month = period;
+  const prev1 = monthShift(period, -1);
+  const prev2 = monthShift(period, -2);
   try {
     const curr = state.currency || (state.accounts && state.accounts[0]?.currency) || "GBP";
-    const [summary, categories, budgets, goals, txs, accounts] = await Promise.all([
-      getJson(`/analytics/monthly?month=${period}&currency=${encodeURIComponent(curr)}`),
-      getJson(`/analytics/categories?month=${period}&currency=${encodeURIComponent(curr)}`),
-      getJson(`/budgets?month=${period}`).catch(() => []),
-      getJson("/goals").catch(() => []),
-      getJson(`/transactions?month=${period}&limit=200`).catch(() => []),
-      getJson("/accounts").catch(() => [])
-    ]);
+    const c = encodeURIComponent(curr);
+    const [summary, categories, budgets, goals, txs, accounts, prevSummary1, prevCats1, prevSummary2] =
+      await Promise.all([
+        getJson(`/analytics/monthly?month=${period}&currency=${c}`),
+        getJson(`/analytics/categories?month=${period}&currency=${c}`),
+        getJson(`/budgets?month=${period}`).catch(() => []),
+        getJson("/goals").catch(() => []),
+        getJson(`/transactions?month=${period}&limit=200`).catch(() => []),
+        getJson("/accounts").catch(() => []),
+        // Prior two months power the "vs last month" deltas and the 3-month cashflow
+        // chart. Without them every delta compared the month against itself (£0.00).
+        getJson(`/analytics/monthly?month=${prev1}&currency=${c}`).catch(() => null),
+        getJson(`/analytics/categories?month=${prev1}&currency=${c}`).catch(() => []),
+        getJson(`/analytics/monthly?month=${prev2}&currency=${c}`).catch(() => null)
+      ]);
 
     state.data[period] = { ...summary, categories };
+    if (prevSummary1) state.data[prev1] = { ...prevSummary1, categories: prevCats1 || [] };
+    if (prevSummary2) {
+      state.data[prev2] = { ...prevSummary2, categories: state.data[prev2]?.categories || [] };
+    }
     state.budgets[period] = budgets;
     state.goals = goals;
     state.transactions = txs;
@@ -206,6 +219,7 @@ function updateHealthUI(health) {
 }
 
 function renderCurrentRoute() {
+  updateCurrencySwitch();
   $("nav-tx-count").textContent = state.transactions.length || (state.data[state.month]?.transaction_count || 0);
   if (state.accounts.length > 0) {
     $("active-account-label").textContent = state.accounts[0].name;
@@ -1156,21 +1170,7 @@ function renderCategoriesView() {
   const goals = state.goals || [];
   const goalsList = $("goals-list");
   if (goals.length === 0) {
-    goalsList.innerHTML = `
-      <div class="goal-item">
-        <div class="goal-head">
-          <strong>Emergency Fund</strong>
-          <span class="num" style="font-weight:700; font-size:12px;">£2,500 / £6,000</span>
-        </div>
-        <div class="goal-bar-wrap">
-          <div class="goal-bar-fill" style="width:41.6%"></div>
-        </div>
-        <div class="goal-foot">
-          <span>41.6% completed</span>
-          <span>Target: Dec 2026</span>
-        </div>
-      </div>
-    `;
+    goalsList.innerHTML = `<p style="color:var(--muted); font-size:12px;">No savings goals yet. Add one from the CLI: <code>pfa goals add "Emergency fund" 6000</code>.</p>`;
   } else {
     goalsList.innerHTML = goals.map((g) => {
       const pct = g.target_minor > 0 ? Math.min(100, (g.current_minor / g.target_minor) * 100).toFixed(1) : 0;
@@ -1387,7 +1387,7 @@ function renderFactsUsed(msg) {
     </div>
     <div class="fact-item">
       <strong>Provenance &amp; Source</strong>
-      <small>${msg.provenance || "Deterministic SQLite"} · Zero Hallucination Guarantee</small>
+      <small>${escapeHtml(msg.provenance || "Deterministic SQLite")} · Verified against the local ledger</small>
     </div>
   `;
 }
@@ -1509,6 +1509,48 @@ function setupNavigation() {
   $("ledger-direction-filter").addEventListener("change", renderActivityView);
 }
 
+// Show a currency switcher only when the ledger actually holds more than one.
+// The dashboard renders one currency at a time; without this, every account and
+// month in a non-default currency was silently unreachable.
+function updateCurrencySwitch() {
+  const select = $("currency-select");
+  if (!select) return;
+  const currencies = [...new Set((state.accounts || []).map((a) => a.currency).filter(Boolean))].sort();
+  if (currencies.length < 2) {
+    select.hidden = true;
+    return;
+  }
+  select.hidden = false;
+  const active = state.currency || currencies[0];
+  select.innerHTML = currencies
+    .map((c) => `<option value="${escapeHtml(c)}"${c === active ? " selected" : ""}>${escapeHtml(c)}</option>`)
+    .join("");
+}
+
+// Pick the most recent month that has transactions in `currency` (falling back to
+// any currency). Landing on the calendar-current month made the whole dashboard
+// look broken, because it is almost always empty.
+// ponytail: reads up to 500 recent rows; fine for a local single-user ledger.
+async function latestMonthWithData(currency) {
+  try {
+    const txs = await getJson("/transactions?limit=500");
+    const monthsFor = (cur) =>
+      (txs || [])
+        .filter((t) => !cur || !t.currency || t.currency === cur)
+        .map((t) => String(t.date || "").slice(0, 7))
+        .filter((m) => m.length === 7)
+        .sort();
+    const scoped = monthsFor(currency);
+    if (scoped.length > 0) return scoped[scoped.length - 1];
+    const any = monthsFor(null);
+    if (any.length > 0) return any[any.length - 1];
+  } catch (_) {
+    // API unreachable — fall back to the current month; loadMonthData shows the
+    // error banner.
+  }
+  return state.month;
+}
+
 // INITIALIZATION
 document.addEventListener("DOMContentLoaded", () => {
   setupNavigation();
@@ -1516,8 +1558,40 @@ document.addEventListener("DOMContentLoaded", () => {
   setupUploadHandlers();
   setupChatHandlers();
 
-  const initialRoute = window.location.hash.replace("#", "") || "overview";
-  loadMonthData(state.month).then(() => {
-    setRoute(initialRoute);
+  const select = $("currency-select");
+  select?.addEventListener("change", async () => {
+    state.currency = select.value;
+    const month = await latestMonthWithData(state.currency);
+    await loadMonthData(month);
   });
+
+  const initialRoute = window.location.hash.replace("#", "") || "overview";
+  bootstrapDashboard().then(() => setRoute(initialRoute));
 });
+
+async function bootstrapDashboard() {
+  let accounts = [];
+  let txs = [];
+  try {
+    [accounts, txs] = await Promise.all([
+      getJson("/accounts"),
+      getJson("/transactions?limit=500").catch(() => [])
+    ]);
+  } catch (_) {
+    return loadMonthData(state.month);
+  }
+  // Open on the freshest activity: the currency of the most recent transaction,
+  // then that currency's latest month.
+  const mostRecent = [...(txs || [])]
+    .filter((t) => t.date)
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)))
+    .pop();
+  state.currency = mostRecent?.currency || accounts[0]?.currency || "GBP";
+  const months = (txs || [])
+    .filter((t) => (t.currency || state.currency) === state.currency)
+    .map((t) => String(t.date || "").slice(0, 7))
+    .filter((m) => m.length === 7)
+    .sort();
+  const month = months.length > 0 ? months[months.length - 1] : state.month;
+  return loadMonthData(month);
+}

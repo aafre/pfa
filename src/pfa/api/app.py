@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import date, datetime
@@ -982,6 +983,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/", include_in_schema=False)
     def dashboard() -> Response:
         html = (web_root / "index.html").read_text(encoding="utf-8")
+        # Rewrite the static asset cache-buster to the newest asset mtime so an
+        # edited app.js/styles.css actually reaches the browser. The checked-in
+        # "?t=178837" token never changed, so cached bundles went stale.
+        try:
+            token = str(
+                int(max((web_root / name).stat().st_mtime for name in ("app.js", "styles.css")))
+            )
+            html = re.sub(r"(app\.js|styles\.css)\?t=\d+", rf"\1?t={token}", html)
+        except OSError:
+            pass
         return Response(html, media_type="text/html")
 
     return app

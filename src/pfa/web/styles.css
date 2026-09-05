@@ -498,13 +498,24 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   gap: 6px;
 }
 
-.month-arrow, .month-current {
+.month-arrow, .month-current, .month-controls .currency-select {
   height: 38px;
   border: 1px solid var(--line-strong);
   color: var(--ink);
   background: var(--surface);
   border-radius: var(--radius-sm);
   transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.month-controls .currency-select {
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.month-controls .currency-select:hover {
+  border-color: var(--ink);
 }
 
 .month-arrow {
