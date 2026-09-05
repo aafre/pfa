@@ -69,13 +69,19 @@ def deterministic_answer(
                     ),
                     0,
                 )
-                return f"{category} spending in {period.strftime('%Y-%m')} was {_amount(total, currency)}."
+                return (
+                    f"{category} spending in {period.strftime('%Y-%m')} "
+                    f"was {_amount(total, currency)}."
+                )
     month_name = next((name for name in _MONTHS if re.search(rf"\b{name}\b", lower)), None)
     if month_name and any(word in lower for word in ("spending", "spend", "spent", "estimate")):
         period = _period_for_name(analytics, month_name)
         if period:
             summary = analytics.monthly_summary(period, currency=currency)
-            return f"Total spending in {summary.period} was {_amount(summary.spending_minor, currency)}."
+            return (
+                f"Total spending in {summary.period} "
+                f"was {_amount(summary.spending_minor, currency)}."
+            )
     if "categories" in lower and "increased" in lower:
         rows = analytics.transactions.all()
         if rows:
@@ -121,8 +127,8 @@ def deterministic_answer(
         if not goals:
             return "No active financial goals are recorded."
         return "Active goals: " + "; ".join(
-            f"{goal.name}: {_amount(goal.current_minor, currency)} of {_amount(goal.target_minor, currency)} "
-            f"({goal.progress_percent:.2f}%)"
+            f"{goal.name}: {_amount(goal.current_minor, currency)} of "
+            f"{_amount(goal.target_minor, currency)} ({goal.progress_percent:.2f}%)"
             for goal in goals
         )
     if "more expensive" in lower or "compared with" in lower:
@@ -135,7 +141,8 @@ def deterministic_answer(
             if current and previous:
                 comparison = analytics.compare_periods(current, previous, currency=currency)
                 current_categories = {
-                    item.category: item.total_minor for item in analytics.category_spending(current, currency=currency)
+                    item.category: item.total_minor
+                    for item in analytics.category_spending(current, currency=currency)
                 }
                 previous_categories = {
                     item.category: item.total_minor
@@ -150,13 +157,16 @@ def deterministic_answer(
                     key=lambda item: -item[1],
                 )[:3]
                 reasons = (
-                    "; ".join(f"{category} +{_amount(delta, currency)}" for category, delta in increases)
+                    "; ".join(
+                        f"{category} +{_amount(delta, currency)}" for category, delta in increases
+                    )
                     or "no category increased"
                 )
                 delta = comparison.current.spending_minor - comparison.previous.spending_minor
                 direction = "increased" if delta >= 0 else "decreased"
                 return (
-                    f"Spending {direction} from {_amount(comparison.previous.spending_minor, currency)} "
+                    f"Spending {direction} from "
+                    f"{_amount(comparison.previous.spending_minor, currency)} "
                     f"in {comparison.previous.period} to "
                     f"{_amount(comparison.current.spending_minor, currency)} "
                     f"in {comparison.current.period}. Main changes: {reasons}."

@@ -162,7 +162,13 @@ def test_unsupported_hdfc_formats_return_guidance_and_clean_staging(tmp_path) ->
     with TestClient(create_app(config)) as client:
         spreadsheet = client.post(
             "/imports/preview",
-            files={"file": ("statement.xlsx", b"legacy workbook", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+            files={
+                "file": (
+                    "statement.xlsx",
+                    b"legacy workbook",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
         )
         unknown = client.post(
             "/imports/preview",

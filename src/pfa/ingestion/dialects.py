@@ -165,7 +165,10 @@ def _csv_detection(path: Path) -> AdapterDetection:
         header = []
     if HDFC_IN_DELIMITED.header_matches(header) or (
         "hdfc" in lower
-        and ("statement of account" in lower or ("withdrawal amt" in lower and "closing balance" in lower))
+        and (
+            "statement of account" in lower
+            or ("withdrawal amt" in lower and "closing balance" in lower)
+        )
     ):
         return AdapterDetection(
             HDFC_IN_DELIMITED,
@@ -178,7 +181,12 @@ def _csv_detection(path: Path) -> AdapterDetection:
     headers = {" ".join(cell.strip().lower().split()) for cell in header}
     if "hsbc" in lower:
         if {"paid out", "paid in"}.issubset(headers) or {"money out", "money in"}.issubset(headers):
-            return AdapterDetection(HSBC_UK_CURRENT, 0.95, ("hsbc_marker", "two_column_cash_headers"), institution="HSBC")
+            return AdapterDetection(
+                HSBC_UK_CURRENT,
+                0.95,
+                ("hsbc_marker", "two_column_cash_headers"),
+                institution="HSBC",
+            )
         if "credit card" in lower and (" cr" in lower or "credit" in lower):
             return AdapterDetection(HSBC_UK_CARD, 0.9, ("card_marker",), institution="HSBC")
         return AdapterDetection(HSBC_UK_CURRENT, 0.9, ("hsbc_marker",), institution="HSBC")
@@ -208,9 +216,13 @@ def _pdf_detection(path: Path) -> AdapterDetection:
     lower = text.lower()
     if "hsbc" in lower:
         if any(marker in lower for marker in ("credit limit", "available credit")):
-            return AdapterDetection(HSBC_UK_CARD, 0.95, ("hsbc_marker", "card_marker"), institution="HSBC")
+            return AdapterDetection(
+                HSBC_UK_CARD, 0.95, ("hsbc_marker", "card_marker"), institution="HSBC"
+            )
         if "paid out" in lower or "paid in" in lower:
-            return AdapterDetection(HSBC_UK_CURRENT, 0.95, ("hsbc_marker", "cash_headers"), institution="HSBC")
+            return AdapterDetection(
+                HSBC_UK_CURRENT, 0.95, ("hsbc_marker", "cash_headers"), institution="HSBC"
+            )
         return AdapterDetection(HSBC_UK_CURRENT, 0.9, ("hsbc_marker",), institution="HSBC")
     if (
         "americanexpress.co.uk" in lower

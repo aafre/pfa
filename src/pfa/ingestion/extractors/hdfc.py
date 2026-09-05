@@ -156,7 +156,9 @@ class HdfcDelimitedExtractor:
             wb = xlrd.open_workbook(source.path)
             sheet = wb.sheet_by_index(0)
         except Exception:
-            result.issues.append(CandidateIssue(UNREADABLE_FILE, "could not read HDFC .xls workbook"))
+            result.issues.append(
+                CandidateIssue(UNREADABLE_FILE, "could not read HDFC .xls workbook")
+            )
             return result
 
         candidates: list[CandidateTransaction] = []
@@ -165,7 +167,11 @@ class HdfcDelimitedExtractor:
         for r in range(sheet.nrows):
             vals = [str(sheet.cell_value(r, c)).strip() for c in range(sheet.ncols)]
             if not in_data:
-                if vals and vals[0].lower() == "date" and any("narration" in v.lower() for v in vals):
+                if (
+                    vals
+                    and vals[0].lower() == "date"
+                    and any("narration" in v.lower() for v in vals)
+                ):
                     in_data = True
                 continue
             all_text = " ".join(vals).lower()
@@ -218,15 +224,22 @@ class HdfcDelimitedExtractor:
                 continue
 
             date_slice = col_spans[0] if len(col_spans) > 0 else (0, 10)
-            date_part = line[date_slice[0] : date_slice[1]].strip() if len(line) > date_slice[0] else ""
+            date_part = (
+                line[date_slice[0] : date_slice[1]].strip() if len(line) > date_slice[0] else ""
+            )
             if len(date_part) in (8, 10) and date_part[2] == "/" and date_part[5] == "/":
                 if pending:
                     line_num += 1
                     candidates.append(_candidate(pending, line_num, self.dialect))
 
-                def _get_col(idx: int, default_slice: tuple[int, int | None]) -> str:
-                    s, e = col_spans[idx] if len(col_spans) > idx else default_slice
-                    return line[s:e].strip() if len(line) > s else ""
+                def _get_col(
+                    idx: int,
+                    default_slice: tuple[int, int | None],
+                    spans: list[tuple[int, int]] = col_spans,
+                    row: str = line,
+                ) -> str:
+                    s, e = spans[idx] if len(spans) > idx else default_slice
+                    return row[s:e].strip() if len(row) > s else ""
 
                 narr = _get_col(1, (10, 50))
                 ref = _get_col(2, (52, 68))
@@ -237,7 +250,9 @@ class HdfcDelimitedExtractor:
                 pending = [date_part, narr, val_dt, w_amt, d_amt, ref, bal]
             elif pending:
                 narr_slice = col_spans[1] if len(col_spans) > 1 else (10, 50)
-                cont_narr = line[narr_slice[0] : narr_slice[1]].strip() if len(line) > narr_slice[0] else ""
+                cont_narr = (
+                    line[narr_slice[0] : narr_slice[1]].strip() if len(line) > narr_slice[0] else ""
+                )
                 if cont_narr:
                     pending[1] = f"{pending[1]} {cont_narr}"
 

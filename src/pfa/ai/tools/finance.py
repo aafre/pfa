@@ -17,7 +17,9 @@ def display_money_fields(value: object, default_currency: str = "GBP") -> object
     curr = str(result.get("currency") or default_currency)
     for key, item in value.items():
         if key.endswith("_minor") and isinstance(item, int):
-            result[f"{key.removesuffix('_minor')}_display"] = f"{curr} {Money(item, curr).to_major():,.2f}"
+            result[f"{key.removesuffix('_minor')}_display"] = (
+                f"{curr} {Money(item, curr).to_major():,.2f}"
+            )
     return result
 
 

@@ -120,12 +120,18 @@ def _unpack_collapsed_table(
 
     withs = [
         w.strip()
-        for w in (cols_lines[debit_col] if debit_col is not None and debit_col < len(cols_lines) else [])
+        for w in (
+            cols_lines[debit_col] if debit_col is not None and debit_col < len(cols_lines) else []
+        )
         if w.strip()
     ]
     deps = [
         d.strip()
-        for d in (cols_lines[credit_col] if credit_col is not None and credit_col < len(cols_lines) else [])
+        for d in (
+            cols_lines[credit_col]
+            if credit_col is not None and credit_col < len(cols_lines)
+            else []
+        )
         if d.strip()
     ]
     bals = [
@@ -135,7 +141,9 @@ def _unpack_collapsed_table(
     ]
     narrs = [
         n.strip()
-        for n in (cols_lines[desc_col] if desc_col is not None and desc_col < len(cols_lines) else [])
+        for n in (
+            cols_lines[desc_col] if desc_col is not None and desc_col < len(cols_lines) else []
+        )
         if n.strip()
     ]
     refs = [
@@ -478,7 +486,8 @@ def _merge_continuations(
     rows: list[_RawRow], header_top: float | None, dialect: Dialect = GENERIC
 ) -> list[_RawRow]:
     """Joins structurally empty wrapped description lines into the row above them,
-    propagates active statement dates across multi-line transactions, and filters out non-transaction headers/footers."""
+    propagates active statement dates across multi-line transactions, and filters
+    out non-transaction headers/footers."""
     kept: list[_RawRow] = []
     current_date: str | None = None
     pending_row: _RawRow | None = None
@@ -494,7 +503,10 @@ def _merge_continuations(
 
         desc = row.fields.get("description", "").lower()
         date_lower = date_val.lower()
-        if any(date_lower.startswith(p) for p in ("total", "subtotal", "balance", "opening balance", "closing balance")):
+        if any(
+            date_lower.startswith(p)
+            for p in ("total", "subtotal", "balance", "opening balance", "closing balance")
+        ):
             pending_row = None
             continue
 
@@ -509,7 +521,12 @@ def _merge_continuations(
                 pending_row.raw_text = f"{pending_row.raw_text} / {row.raw_text}"
                 if row.top is not None:
                     pending_row.top = row.top
-            elif kept and joined and abs((row.top or 0) - (kept[-1].top or 0)) <= _line_height(rows, header_top) * _CONTINUATION_FACTOR:
+            elif (
+                kept
+                and joined
+                and abs((row.top or 0) - (kept[-1].top or 0))
+                <= _line_height(rows, header_top) * _CONTINUATION_FACTOR
+            ):
                 existing = kept[-1].fields.get("description", "")
                 kept[-1].fields["description"] = f"{existing} {joined}".strip()
                 kept[-1].raw_text = f"{kept[-1].raw_text} / {row.raw_text}"
@@ -524,9 +541,10 @@ def _merge_continuations(
             continue
 
         if pending_row is not None:
-            desc = f"{pending_row.fields.get('description', '')} {row.fields.get('description', '')}".strip()
+            prev_desc = pending_row.fields.get("description", "")
+            desc = f"{prev_desc} {row.fields.get('description', '')}".strip()
             row.fields["description"] = desc
-            row.fields["date"] = pending_row.fields.get("date") or current_date
+            row.fields["date"] = pending_row.fields.get("date") or current_date or ""
             pending_row = None
         elif current_date and not row.fields.get("date"):
             row.fields["date"] = current_date

@@ -1,12 +1,9 @@
-from datetime import date
-from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from pfa.domain.money import Money
+
 from pfa.ingestion.candidates import StatementSource
 from pfa.ingestion.dialects import (
-    AMEX_UK_CSV,
     AMEX_UK_PDF,
     HSBC_UK_CARD,
     HSBC_UK_CURRENT,
@@ -24,16 +21,12 @@ from pfa.services.answers import _amount
 def test_bug1_hsbc_card_default_sign_and_amount_resolution():
     """HSBC card purchases default to debit, payments (CR) to credit."""
     # Purchase row without explicit CR
-    resolved_debit = _resolve_amount(
-        {"amount": "92.35", "cr": ""}, HSBC_UK_CARD, "GBP"
-    )
+    resolved_debit = _resolve_amount({"amount": "92.35", "cr": ""}, HSBC_UK_CARD, "GBP")
     assert resolved_debit.direction == "debit"
     assert resolved_debit.minor == 9235
 
     # Payment row with CR marker
-    resolved_credit = _resolve_amount(
-        {"amount": "408.94", "cr": "CR"}, HSBC_UK_CARD, "GBP"
-    )
+    resolved_credit = _resolve_amount({"amount": "408.94", "cr": "CR"}, HSBC_UK_CARD, "GBP")
     assert resolved_credit.direction == "credit"
     assert resolved_credit.minor == 40894
 
@@ -79,11 +72,12 @@ def test_bug5_foreign_currency_amount_cleaning():
 
 def test_bug7_hdfc_fixed_width_text_extraction(tmp_path: Path):
     """HDFC fixed-width formatted text statements parse transactions accurately."""
+    # Fixed-width columns: alignment is the format contract, so these rows can't wrap.
     sample_text = (
-        "Date        Narration                             Chq/Ref Number   Value Dt   Withdrawal Amt.   Deposit Amt.    Closing Balance\n"
-        "----------  ------------------------------------  ---------------  ---------  ----------------  --------------  ----------------\n"
-        "28/08/25    UPI-APPLE SERVICES-APPLE@OKAXIS-1234  000012345678     28/08/25   199.00                            15,000.00\n"
-        "29/08/25    NEFT CR-KOTAK-SALARY CORP-N123456     000087654321     29/08/25                     75,000.00       90,000.00\n"
+        "Date        Narration                             Chq/Ref Number   Value Dt   Withdrawal Amt.   Deposit Amt.    Closing Balance\n"  # noqa: E501
+        "----------  ------------------------------------  ---------------  ---------  ----------------  --------------  ----------------\n"  # noqa: E501
+        "28/08/25    UPI-APPLE SERVICES-APPLE@OKAXIS-1234  000012345678     28/08/25   199.00                            15,000.00\n"  # noqa: E501
+        "29/08/25    NEFT CR-KOTAK-SALARY CORP-N123456     000087654321     29/08/25                     75,000.00       90,000.00\n"  # noqa: E501
     )
     test_file = tmp_path / "sample.txt"
     test_file.write_text(sample_text, encoding="utf-8")
@@ -121,5 +115,10 @@ def test_bug16_upi_and_neft_merchant_normalization():
     """Extract clean merchant from Indian UPI, NEFT, and ACH narrations."""
     assert merchant_from_description("UPI-APPLE MEDIA-APPLE@OKAXIS-423523523") == "APPLE MEDIA"
     assert merchant_from_description("UPI-CRED CLUB-PAYTO@AXIS-987654") == "CRED CLUB"
-    assert merchant_from_description("POS 41234567 RELIANCE RETAIL MUMBAI") == "RELIANCE RETAIL MUMBAI"
-    assert merchant_from_description("NEFT CR-HDFC0000001-ACME CORP SALARY-N1234") == "ACME CORP SALARY"
+    assert (
+        merchant_from_description("POS 41234567 RELIANCE RETAIL MUMBAI") == "RELIANCE RETAIL MUMBAI"
+    )
+    assert (
+        merchant_from_description("NEFT CR-HDFC0000001-ACME CORP SALARY-N1234")
+        == "ACME CORP SALARY"
+    )

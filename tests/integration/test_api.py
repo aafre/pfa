@@ -130,4 +130,3 @@ def test_transactions_month_filter_and_chat_currency(tmp_path) -> None:
         )
         assert chat_resp.status_code == 200
         assert "INR" in chat_resp.json()["answer"]
-

@@ -23,7 +23,6 @@ from .candidates import (
     UNSUPPORTED_FILE_TYPE,
     UNSUPPORTED_SPREADSHEET_FORMAT,
     UNSUPPORTED_TEXT_FORMAT,
-    UNSUPPORTED_TEXT_LAYOUT,
     UPLOAD_FAILED,
     StatementSource,
 )
@@ -68,7 +67,8 @@ def stage_upload(
     if ext not in SUPPORTED_EXTENSIONS:
         raise UploadRejected(
             UNSUPPORTED_FILE_TYPE,
-            f"unsupported file type {ext or '(none)'!r}; only .csv, .txt, .xls, and .pdf are accepted",
+            f"unsupported file type {ext or '(none)'!r}; "
+            "only .csv, .txt, .xls, and .pdf are accepted",
         )
     media_type = file.content_type or ""
     # Lowercased: a blocklist that "Image/PNG" walks straight through is not a blocklist.

@@ -54,3 +54,8 @@ python_version = "3.12"
 strict = true
 mypy_path = "src"
 plugins = ["pydantic.mypy"]
+
+# xlrd (legacy .xls reader) ships no type stubs and has no types-xlrd package.
+[[tool.mypy.overrides]]
+module = "xlrd"
+ignore_missing_imports = true

@@ -254,10 +254,11 @@ def _run_extraction(
     try:
         return future.result(timeout=settings.extraction_timeout_seconds)
     except concurrent.futures.TimeoutError:
-        def _cleanup(_: concurrent.futures.Future[Any]) -> None:
+
+        def _cleanup(_: concurrent.futures.Future[ExtractionResult]) -> None:
             import time
 
-            for _ in range(5):
+            for _attempt in range(5):
                 try:
                     source.path.unlink(missing_ok=True)
                     return
