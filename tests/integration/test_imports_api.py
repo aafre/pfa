@@ -375,11 +375,16 @@ def test_reuploading_the_same_pdf_reports_duplicates_and_imports_nothing(tmp_pat
     pdf = _pdf_bytes([["2026-08-01", "Salary", "2000.00"]])
     with TestClient(create_app(settings)) as client:
         first = _upload_pdf(client, pdf, account="Main account")
-        client.post(f"/imports/{first.json()['id']}/commit")
+        first_id = first.json()["id"]
+        # Single-column all-positive statement: the sign convention must be stated
+        # before it can commit.
+        client.patch(f"/imports/{first_id}", json={"amount_sign": "as_written"})
+        client.post(f"/imports/{first_id}/commit")
 
         second = _upload_pdf(client, pdf, account="Main account")
         body = second.json()
         assert body["counts"]["duplicate"] == 1
+        client.patch(f"/imports/{body['id']}", json={"amount_sign": "as_written"})
         commit = client.post(f"/imports/{body['id']}/commit")
         assert commit.json()["counts"]["imported"] == 0
 
@@ -471,6 +476,36 @@ def test_unsigned_credit_card_csv_is_never_silently_booked_as_income(tmp_path) -
         assert by_description["AMZN MKTPLACE"]["flow_direction"] == "debit"
         assert by_description["MARYLEBONE STATION"]["flow_direction"] == "debit"
         assert by_description["PAYMENT RECEIVED THANK YOU"]["flow_direction"] == "credit"
+
+
+def test_all_positive_generic_statement_cannot_commit_without_a_sign_convention(tmp_path) -> None:
+    """Every row unsigned: genuinely ambiguous. Assigning an account must not unblock it."""
+    settings = _settings(tmp_path)
+    all_positive = (
+        b"date,description,amount,account\n"
+        b"2026-08-19,AMZN MKTPLACE,25.92,Card\n"
+        b"2026-08-20,TESCO,14.10,Card\n"
+    )
+    with TestClient(create_app(settings)) as client:
+        body = _upload(client, all_positive, filename="card.csv").json()
+        batch_id = body["id"]
+        assert body["amount_sign"] is None
+        # Blocked in the preview itself, before any commit attempt.
+        assert body["status"] == "blocked"
+        assert any(i["code"] == "GENERIC_SIGN_CONFIRMATION_REQUIRED" for i in body["issues"])
+
+        # Assigning an account does not clear the ambiguity.
+        assigned = client.patch(f"/imports/{batch_id}", json={"account": "Card"}).json()
+        assert assigned["status"] == "blocked"
+        assert client.post(f"/imports/{batch_id}/commit").status_code == 409
+
+        after_sign = client.patch(
+            f"/imports/{batch_id}", json={"amount_sign": "debit_positive"}
+        ).json()
+        assert after_sign["status"] == "preview_ready"
+        committed = client.post(f"/imports/{batch_id}/commit")
+        assert committed.status_code == 200
+        assert committed.json()["counts"]["imported"] == 2
 
 
 def test_two_column_statements_ignore_the_amount_sign_convention(tmp_path) -> None:

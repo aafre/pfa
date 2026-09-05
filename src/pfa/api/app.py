@@ -25,12 +25,18 @@ from pfa.analytics.service import cash_position
 from pfa.config import Settings, get_settings
 from pfa.db.models import (
     ImportBatchModel,
+    TransactionModel,
     TransferEventModel,
     TransferMatchDecisionModel,
 )
 from pfa.domain.accounts import AccountType
-from pfa.domain.errors import BatchError, UploadRejected
-from pfa.domain.transactions import TransferLegRole, TransferPurpose, signed_minor
+from pfa.domain.errors import BatchError, UploadRejected, ValidationError
+from pfa.domain.transactions import (
+    SpendingCategory,
+    TransferLegRole,
+    TransferPurpose,
+    signed_minor,
+)
 from pfa.ingestion.batches import (
     BatchPatch,
     NewAccountDraft,
@@ -57,6 +63,7 @@ from pfa.ingestion.transfers import (
 from pfa.ingestion.upload import stage_upload, sweep_upload_dir
 from pfa.observability import TimedOperation
 from pfa.services.answers import deterministic_answer
+from pfa.services.corrections import correct_transaction
 from pfa.services.fx import fetch_and_store_fx_rates
 from pfa.services.health import health_report
 from pfa.services.review import monthly_review_evidence
@@ -76,6 +83,10 @@ class TransactionResponse(BaseModel):
     classification_source: str
     signed_amount_minor: int
     account_id: int
+
+
+class CategoryCorrectionRequest(BaseModel):
+    category: str
 
 
 class AccountResponse(BaseModel):
@@ -676,25 +687,52 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if account_id:
                 rows = [r for r in rows if str(r.account_id) == str(account_id)]
             rows = rows[-limit:]
-            return [
-                TransactionResponse(
-                    id=row.id,
-                    date=row.transaction_date,
-                    description=row.raw_description,
-                    merchant=row.merchant,
-                    amount_minor=row.amount_minor,
-                    flow_direction=row.flow_direction,
-                    currency=row.currency,
-                    kind=row.kind,
-                    category=row.category,
-                    classification_source=row.classification_source,
-                    signed_amount_minor=(signed_minor(row.amount_minor, row.flow_direction)),
-                    account_id=row.account_id,
-                )
-                for row in rows
-            ]
+            return [_tx_response(row) for row in rows]
         finally:
             close_services(engine, services)
+
+    def _tx_response(row: TransactionModel) -> TransactionResponse:
+        return TransactionResponse(
+            id=row.id,
+            date=row.transaction_date,
+            description=row.raw_description,
+            merchant=row.merchant,
+            amount_minor=row.amount_minor,
+            flow_direction=row.flow_direction,
+            currency=row.currency,
+            kind=row.kind,
+            category=row.category,
+            classification_source=row.classification_source,
+            signed_amount_minor=signed_minor(row.amount_minor, row.flow_direction),
+            account_id=row.account_id,
+        )
+
+    @app.get("/categories")
+    def list_categories() -> list[str]:
+        return [c.value for c in SpendingCategory]
+
+    @app.patch("/transactions/{transaction_id}", response_model=TransactionResponse)
+    def correct_transaction_category(
+        transaction_id: int, request: CategoryCorrectionRequest
+    ) -> TransactionResponse:
+        try:
+            category = SpendingCategory(request.category)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422, detail=f"unknown category {request.category!r}"
+            ) from exc
+        engine, services = open_services(active_settings)
+        try:
+            row = correct_transaction(services.uow, transaction_id, category)
+            response = _tx_response(row)
+            close_services(engine, services)
+            return response
+        except ValidationError as exc:
+            close_services(engine, services, False)
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception:
+            close_services(engine, services, False)
+            raise
 
     def _suggestion_response(
         decision: TransferMatchDecisionModel,

@@ -16,11 +16,13 @@ from pfa.ai.agents.categorizer import LocalTransactionClassifier
 from pfa.ai.deps import FinanceDependencies
 from pfa.ai.models import available_models
 from pfa.config import get_settings
-from pfa.db.models import BudgetModel, GoalModel, MerchantRuleModel, TransactionModel
+from pfa.db.models import BudgetModel, GoalModel
+from pfa.domain.errors import ValidationError
 from pfa.domain.money import Money
-from pfa.domain.transactions import ClassificationSource, SpendingCategory
+from pfa.domain.transactions import SpendingCategory
 from pfa.ingestion.service import ImportService
 from pfa.services.answers import deterministic_answer
+from pfa.services.corrections import correct_transaction
 from pfa.services.fx import fetch_and_store_fx_rates
 from pfa.services.health import health_report
 from pfa.services.review import monthly_review_evidence
@@ -174,24 +176,10 @@ def transactions_correct(
     """Correct one transaction and persist a narrow exact-description rule."""
     engine, services = open_services(get_settings())
     try:
-        row = services.uow.session.get(TransactionModel, transaction_id)
-        if row is None:
-            raise typer.BadParameter(f"transaction {transaction_id} not found")
-        row.category = category.value
-        row.classification_source = ClassificationSource.USER.value
-        row.classification_confidence = 1.0
-        row.classification_reason = "explicit user correction"
-        pattern = row.normalized_description
-        if services.uow.rules.find_pattern(pattern) is None:
-            services.uow.rules.add(
-                MerchantRuleModel(
-                    pattern=pattern,
-                    kind=row.kind,
-                    category=category.value,
-                    transfer_purpose=row.transfer_purpose,
-                    created_from_user_correction=True,
-                )
-            )
+        try:
+            correct_transaction(services.uow, transaction_id, category)
+        except ValidationError as exc:
+            raise typer.BadParameter(str(exc)) from exc
         close_services(engine, services)
         console.print(
             f"Corrected transaction {transaction_id}; "

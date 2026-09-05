@@ -27,6 +27,34 @@ def test_api_import_and_analytics_are_local_and_typed(tmp_path) -> None:
     assert client.get("/transactions").json()[0]["flow_direction"] == "credit"
 
 
+def test_patch_transaction_category_is_a_user_correction(tmp_path) -> None:
+    csv_path = tmp_path / "one.csv"
+    csv_path.write_text(
+        "date,description,amount,kind,category\n2026-08-02,CORNER SHOP,-4.20,expense,\n"
+    )
+    database_url = f"sqlite:///{tmp_path / 'pfa.db'}"
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "head")
+    app = create_app(Settings(database_url=database_url))
+    with TestClient(app) as client:
+        client.post("/imports", json={"path": str(csv_path)})
+        tx_id = client.get("/transactions").json()[0]["id"]
+        assert client.get("/transactions").json()[0]["category"] is None
+
+        assert "groceries" in client.get("/categories").json()
+        bad = client.patch(f"/transactions/{tx_id}", json={"category": "nonsense"})
+        assert bad.status_code == 422
+        missing = client.patch("/transactions/999999", json={"category": "groceries"})
+        assert missing.status_code == 404
+
+        patched = client.patch(f"/transactions/{tx_id}", json={"category": "groceries"})
+        assert patched.status_code == 200
+        assert patched.json()["category"] == "groceries"
+        assert patched.json()["classification_source"] == "user"
+        assert client.get("/transactions").json()[0]["category"] == "groceries"
+
+
 def test_dashboard_and_static_assets_are_served(tmp_path) -> None:
     database_url = f"sqlite:///{tmp_path / 'pfa.db'}"
     config = Config("alembic.ini")

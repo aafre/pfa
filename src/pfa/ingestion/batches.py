@@ -533,13 +533,10 @@ def _binding_issues(
                         "confirm the derived opening balance and date before creating this account",
                     )
                 )
-    if (
-        batch.adapter_id == "generic"
-        and batch.amount_sign is None
-        and batch.destination_account is None
-    ):
-        # Preserve signed generic imports for the legacy API; unsigned rows still need a
-        # deliberate convention before they can be committed.
+    if batch.adapter_id in (None, "generic") and batch.amount_sign is None:
+        # An all-positive statement is genuinely ambiguous between a credit card and a
+        # month with no refunds. The convention must be stated explicitly - assigning an
+        # account does not resolve it, and no-adapter (adapter_id is None) is still generic.
         candidates = batch_candidates(batch)
         if candidates and all(c.amount_minor is None or c.direction != "debit" for c in candidates):
             issues.append(

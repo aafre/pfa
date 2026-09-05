@@ -27,6 +27,7 @@ const state = {
   activeBatch: null,
   batchFilter: "all",
   chatHistory: [],
+  categoryOptions: [],
   source: "live",
   modelAvailable: true,
   loadError: null
@@ -1225,17 +1226,24 @@ function renderActivityView() {
     return;
   }
 
+  const options = state.categoryOptions && state.categoryOptions.length
+    ? state.categoryOptions
+    : categories;
+
   tbody.innerHTML = filtered.map((t) => {
     const isDebit = t.flow_direction === "debit";
     const amountStr = formatMoney(t.amount_minor, t.currency);
     const sourceClass = t.classification_source === "rule" ? "tag-deterministic" : t.classification_source === "model" ? "tag-model" : "tag-import";
+    const optionHtml = `<option value="">— uncategorized —</option>` + options
+      .map((c) => `<option value="${escapeHtml(c)}"${c === t.category ? " selected" : ""}>${escapeHtml(prettyCategory(c))}</option>`)
+      .join("");
 
     return `
       <tr>
         <td><span class="num">${escapeHtml(t.date || "—")}</span></td>
         <td><strong>${escapeHtml(t.description || "—")}</strong></td>
         <td>${escapeHtml(t.merchant || "—")}</td>
-        <td><span class="category-tag">${escapeHtml(prettyCategory(t.category))}</span></td>
+        <td><select class="ledger-cat-select" data-tx-id="${t.id}" aria-label="Category for ${escapeHtml(t.description || "transaction")}">${optionHtml}</select></td>
         <td><span class="provenance-tag ${sourceClass}">${escapeHtml(t.classification_source || "rule")}</span></td>
         <td class="ledger-amount ${isDebit ? "is-outflow" : "is-inflow"}">
           ${isDebit ? `−${amountStr}` : `+${amountStr}`}
@@ -1243,6 +1251,32 @@ function renderActivityView() {
       </tr>
     `;
   }).join("");
+
+  tbody.querySelectorAll(".ledger-cat-select").forEach((sel) => {
+    sel.addEventListener("change", () => reclassifyTransaction(Number(sel.dataset.txId), sel.value));
+  });
+}
+
+// Persist a manual category via PATCH /transactions/{id}, then reflect it locally.
+async function reclassifyTransaction(txId, category) {
+  if (!category) return; // clearing back to uncategorized isn't a supported correction
+  try {
+    const updated = await apiRequest(`/transactions/${txId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ category })
+    });
+    const row = (state.transactions || []).find((t) => t.id === txId);
+    if (row) {
+      row.category = updated.category;
+      row.classification_source = updated.classification_source;
+    }
+    showToast(`Categorized as "${prettyCategory(category)}"`);
+    renderActivityView();
+  } catch (err) {
+    showToast(err.message || "Could not update category", true);
+    renderActivityView();
+  }
 }
 
 // 5. ASK PFA (AI / DETERMINISTIC CHAT)
@@ -1573,9 +1607,10 @@ async function bootstrapDashboard() {
   let accounts = [];
   let txs = [];
   try {
-    [accounts, txs] = await Promise.all([
+    [accounts, txs, state.categoryOptions] = await Promise.all([
       getJson("/accounts"),
-      getJson("/transactions?limit=500").catch(() => [])
+      getJson("/transactions?limit=500").catch(() => []),
+      getJson("/categories").catch(() => [])
     ]);
   } catch (_) {
     return loadMonthData(state.month);

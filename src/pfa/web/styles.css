@@ -1751,6 +1751,25 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   text-transform: capitalize;
 }
 
+.ledger-cat-select {
+  max-width: 150px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: var(--paper);
+  border: 1px solid transparent;
+  color: var(--ink-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: capitalize;
+  cursor: pointer;
+}
+
+.ledger-cat-select:hover,
+.ledger-cat-select:focus {
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+
 .provenance-tag {
   display: inline-flex;
   align-items: center;
