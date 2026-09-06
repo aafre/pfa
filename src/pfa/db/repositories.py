@@ -36,15 +36,41 @@ class TransactionRepository:
         )
 
     def between(self, start: date, end: date) -> list[TransactionModel]:
-        statement = (
-            select(TransactionModel)
-            .where(
-                TransactionModel.transaction_date >= start,
-                TransactionModel.transaction_date <= end,
-            )
-            .order_by(TransactionModel.transaction_date)
-        )
+        return self.query(start=start, end=end)
+
+    def query(
+        self,
+        *,
+        start: date | None = None,
+        end: date | None = None,
+        account_id: int | None = None,
+        limit: int | None = None,
+    ) -> list[TransactionModel]:
+        """Date/account bounded read, ordered oldest first, filtered in SQL."""
+        statement = select(TransactionModel)
+        if start is not None:
+            statement = statement.where(TransactionModel.transaction_date >= start)
+        if end is not None:
+            statement = statement.where(TransactionModel.transaction_date <= end)
+        if account_id is not None:
+            statement = statement.where(TransactionModel.account_id == account_id)
+        if limit is None:
+            statement = statement.order_by(TransactionModel.transaction_date)
+        else:
+            # Newest `limit` rows, then flip back to oldest-first for callers.
+            statement = statement.order_by(
+                TransactionModel.transaction_date.desc(), TransactionModel.id.desc()
+            ).limit(limit)
+            return list(reversed(list(self.session.scalars(statement))))
         return list(self.session.scalars(statement))
+
+    def months(self, currency: str | None = None) -> list[str]:
+        """Distinct `YYYY-MM` values that have transactions, oldest first."""
+        statement = select(TransactionModel.transaction_date).distinct()
+        if currency:
+            statement = statement.where(TransactionModel.currency == currency)
+        dates = self.session.scalars(statement)
+        return sorted({d.strftime("%Y-%m") for d in dates if d is not None})
 
     def by_ids(self, ids: list[int]) -> list[TransactionModel]:
         if not ids:

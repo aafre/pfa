@@ -21,7 +21,7 @@ from pfa.ai.agents.categorizer import LocalTransactionClassifier
 from pfa.ai.deps import FinanceDependencies
 from pfa.ai.models import available_models
 from pfa.ai.schemas import ChatRequest, ImportRequest
-from pfa.analytics.service import cash_position
+from pfa.analytics.service import cash_position, month_bounds
 from pfa.config import Settings, get_settings
 from pfa.db.models import (
     ImportBatchModel,
@@ -668,26 +668,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/transactions", response_model=list[TransactionResponse])
     def transactions(
         month: str | None = None,
-        account_id: str | None = None,
+        account_id: int | None = None,
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
     ) -> list[TransactionResponse]:
+        start = end = None
+        if month:
+            start, end = month_bounds(_month(month))
         engine, services = open_services(active_settings)
         try:
-            rows = services.uow.transactions.all()
-            if month:
-                rows = [
-                    r
-                    for r in rows
-                    if (
-                        hasattr(r.transaction_date, "strftime")
-                        and r.transaction_date.strftime("%Y-%m") == month
-                    )
-                    or str(r.transaction_date).startswith(month)
-                ]
-            if account_id:
-                rows = [r for r in rows if str(r.account_id) == str(account_id)]
-            rows = rows[-limit:]
+            rows = services.uow.transactions.query(
+                start=start,
+                end=end,
+                account_id=account_id,
+                limit=limit,
+            )
             return [_tx_response(row) for row in rows]
+        finally:
+            close_services(engine, services)
+
+    @app.get("/transactions/months")
+    def transaction_months(currency: str | None = None) -> list[str]:
+        engine, services = open_services(active_settings)
+        try:
+            return services.uow.transactions.months(currency)
         finally:
             close_services(engine, services)
 

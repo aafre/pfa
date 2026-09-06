@@ -151,6 +151,15 @@ def test_transactions_month_filter_and_chat_currency(tmp_path) -> None:
         assert tx_jun.status_code == 200
         assert len(tx_jun.json()) == 0
 
+        # /transactions/months replaces the "pull 500 rows to find the latest
+        # month" bootstrap, and limit keeps the newest rows.
+        assert client.get("/transactions/months").json() == ["2026-07", "2026-08"]
+        assert client.get("/transactions/months?currency=INR").json() == []
+        newest = client.get("/transactions?limit=1").json()
+        assert len(newest) == 1
+        assert newest[0]["date"] == "2026-08-02"
+        assert client.get("/transactions?account_id=999").json() == []
+
         # /chat respects currency
         chat_resp = client.post(
             "/chat",

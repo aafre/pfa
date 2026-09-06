@@ -1564,19 +1564,11 @@ function updateCurrencySwitch() {
 // Pick the most recent month that has transactions in `currency` (falling back to
 // any currency). Landing on the calendar-current month made the whole dashboard
 // look broken, because it is almost always empty.
-// ponytail: reads up to 500 recent rows; fine for a local single-user ledger.
 async function latestMonthWithData(currency) {
   try {
-    const txs = await getJson("/transactions?limit=500");
-    const monthsFor = (cur) =>
-      (txs || [])
-        .filter((t) => !cur || !t.currency || t.currency === cur)
-        .map((t) => String(t.date || "").slice(0, 7))
-        .filter((m) => m.length === 7)
-        .sort();
-    const scoped = monthsFor(currency);
+    const scoped = currency ? await getJson(`/transactions/months?currency=${encodeURIComponent(currency)}`) : [];
     if (scoped.length > 0) return scoped[scoped.length - 1];
-    const any = monthsFor(null);
+    const any = await getJson("/transactions/months");
     if (any.length > 0) return any[any.length - 1];
   } catch (_) {
     // API unreachable — fall back to the current month; loadMonthData shows the
@@ -1605,11 +1597,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
 async function bootstrapDashboard() {
   let accounts = [];
-  let txs = [];
+  let latest = [];
   try {
-    [accounts, txs, state.categoryOptions] = await Promise.all([
+    [accounts, latest, state.categoryOptions] = await Promise.all([
       getJson("/accounts"),
-      getJson("/transactions?limit=500").catch(() => []),
+      getJson("/transactions?limit=1").catch(() => []),
       getJson("/categories").catch(() => [])
     ]);
   } catch (_) {
@@ -1617,16 +1609,6 @@ async function bootstrapDashboard() {
   }
   // Open on the freshest activity: the currency of the most recent transaction,
   // then that currency's latest month.
-  const mostRecent = [...(txs || [])]
-    .filter((t) => t.date)
-    .sort((a, b) => String(a.date).localeCompare(String(b.date)))
-    .pop();
-  state.currency = mostRecent?.currency || accounts[0]?.currency || "GBP";
-  const months = (txs || [])
-    .filter((t) => (t.currency || state.currency) === state.currency)
-    .map((t) => String(t.date || "").slice(0, 7))
-    .filter((m) => m.length === 7)
-    .sort();
-  const month = months.length > 0 ? months[months.length - 1] : state.month;
-  return loadMonthData(month);
+  state.currency = latest[0]?.currency || accounts[0]?.currency || "GBP";
+  return loadMonthData(await latestMonthWithData(state.currency));
 }
