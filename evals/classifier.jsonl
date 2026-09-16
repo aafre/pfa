@@ -1,4 +1,16 @@
-{"description":"TESCO groceries","amount_minor":-1000,"kind":"expense","category":"groceries"}
-{"description":"monthly salary payroll","amount_minor":1000,"kind":"income","category":null}
-{"description":"Netflix subscription","amount_minor":-1000,"kind":"expense","category":"subscriptions"}
-{"description":"savings transfer","amount_minor":-1000,"kind":"transfer","category":null}
+{"case_id":"residual-health","description":"BUPA HEALTH CASH PLAN","amount_minor":-3899,"kind":"expense","category":"health"}
+{"case_id":"residual-groceries","description":"BOOTHSMARKET ONLINE ORDER 48192","amount_minor":-6437,"kind":"expense","category":"groceries"}
+{"case_id":"residual-transport","description":"GWR TICKET OFFICE BRISTOL","amount_minor":-5270,"kind":"expense","category":"transport"}
+{"case_id":"residual-utilities","description":"VIRGIN MEDIA BROADBAND","amount_minor":-4899,"kind":"expense","category":"utilities"}
+{"case_id":"residual-shopping","description":"JOHN LEWIS WEB 004912","amount_minor":-12800,"kind":"expense","category":"shopping"}
+{"case_id":"residual-entertainment","description":"CINEWORLD ONLINE BOOKING","amount_minor":-2650,"kind":"expense","category":"entertainment"}
+{"case_id":"residual-education","description":"OPEN UNIVERSITY MODULE FEE","amount_minor":-18900,"kind":"expense","category":"education"}
+{"case_id":"residual-insurance","description":"AVIVA HOME POLICY","amount_minor":-7400,"kind":"expense","category":"insurance"}
+{"case_id":"residual-charity","description":"SHELTER UK MONTHLY GIFT","amount_minor":-1500,"kind":"expense","category":"gifts_charity"}
+{"case_id":"residual-personal-care","description":"SUPERDRUG PHARMACY TOILETRIES","amount_minor":-2120,"kind":"expense","category":"personal_care"}
+{"case_id":"residual-travel","description":"EUROSTAR PARIS BOOKING","amount_minor":-9640,"kind":"expense","category":"travel"}
+{"case_id":"residual-fee","description":"FOREIGN CARD USAGE FEE","amount_minor":-225,"kind":"fee","category":"fees"}
+{"case_id":"residual-refund","description":"ARGOS REFUND ORDER 83821","amount_minor":3799,"kind":"refund","category":"shopping"}
+{"case_id":"residual-income","description":"ACME LTD EXPENSE REIMBURSEMENT","amount_minor":12450,"kind":"income","category":null}
+{"case_id":"residual-transfer","description":"ISA MONTHLY SUBSCRIPTION","amount_minor":-25000,"kind":"transfer","category":null}
+{"case_id":"residual-credit","description":"CASHBACK REWARD CREDIT","amount_minor":975,"kind":"income","category":null}

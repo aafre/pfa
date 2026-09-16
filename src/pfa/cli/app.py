@@ -383,5 +383,14 @@ def eval_classifier() -> None:
         raise typer.Exit(result.returncode)
 
 
+@app.command("eval-grounded-answers")
+def eval_grounded_answers() -> None:
+    """Evaluate tool use and exact seeded facts in local-model answers."""
+    script = Path(__file__).resolve().parents[3] / "evals" / "grounded_answers.py"
+    result = subprocess.run([sys.executable, str(script)], check=False)
+    if result.returncode:
+        raise typer.Exit(result.returncode)
+
+
 if __name__ == "__main__":
     app()

@@ -67,10 +67,12 @@ PydanticAI has configured retries and the application does not create an unbound
 
 Unit and integration tests prove money semantics, persistence, tools, and API behavior without
 Ollama. Real-model evals belong under `evals/`; they are slower, model-dependent, and excluded from
-normal `pytest`. The checked-in four-case classifier eval is only a compatibility smoke for signed
-input and structured output. Its cases are handled by deterministic rules in normal imports, so its
-accuracy must not be presented as production classifier quality. A representative residual-case
-dataset and grounded-answer eval remain required before broader model-quality claims.
+normal `pytest`. `uv run pfa eval-classifier` scores a synthetic residual-case set with accuracy,
+macro F1, confusion counts, and per-case failures. `uv run pfa eval-grounded-answers` seeds a
+disposable synthetic ledger, then checks expected read-only tool calls and exact deterministic
+display facts in model answers. Neither dataset contains personal statement data. These suites are
+repeatable regression checks, not broad production-quality evidence: expand them with reviewed,
+representative cases before making model-quality claims.
 
 ## Deterministic versus probabilistic
 
