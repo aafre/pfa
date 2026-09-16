@@ -161,6 +161,25 @@ def test_classifier_receives_signed_amounts_from_the_bank_format_adapter(tmp_pat
     engine.dispose()
 
 
+def test_unresolved_import_rows_keep_import_provenance(tmp_path) -> None:
+    path = tmp_path / "unclassified.csv"
+    path.write_text(
+        "date,description,amount\n2026-08-01,ODD MERCHANT 834,-12.50\n",
+        encoding="utf-8",
+    )
+    engine, uow, _ = services()
+
+    result = ImportService(uow).import_csv(path)
+
+    assert result.imported == 1
+    row = uow.transactions.all()[0]
+    assert row.category is None
+    assert row.classification_source == "import"
+    assert row.classification_reason == "requires review"
+    uow.session.close()
+    engine.dispose()
+
+
 def test_headerless_csv_returns_a_parser_error_without_mutation(tmp_path) -> None:
     path = tmp_path / "empty.csv"
     path.write_text("", encoding="utf-8")

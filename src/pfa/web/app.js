@@ -1116,7 +1116,10 @@ function renderCategoriesView() {
 
   const list = $("category-breakdown-list");
   if (categories.length === 0) {
-    list.innerHTML = `<p style="color:var(--muted); padding:20px;">No category spending recorded for ${monthName(state.month)}.</p>`;
+    const copy = totalSpend > 0
+      ? `${formatMoney(totalSpend, data.currency)} spent, none categorised yet for ${monthName(state.month)}.`
+      : `No spending recorded for ${monthName(state.month)}.`;
+    list.innerHTML = `<p style="color:var(--muted); padding:20px;">${copy}</p>`;
   } else {
     const sorted = [...categories].sort((a, b) => Number(b.total_minor || 0) - Number(a.total_minor || 0));
     list.innerHTML = sorted.map((cat) => {

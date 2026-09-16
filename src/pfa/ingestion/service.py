@@ -96,7 +96,9 @@ def _classification(
             return result
     return Classification(
         TransactionKind.EXPENSE if sign < 0 else TransactionKind.INCOME,
-        source=ClassificationSource.UNKNOWN,
+        # The row came from an import even when classification remains unresolved.
+        # Keep provenance truthful so the UI does not imply an unknown data origin.
+        source=ClassificationSource.IMPORT,
         confidence=None,
         reason="requires review",
     )
