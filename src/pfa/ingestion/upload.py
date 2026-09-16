@@ -1,6 +1,7 @@
 """Multipart upload staging: bounded, streamed, and signature-checked.
 
-Accepts CSV and PDF. Never trust the client-supplied filename as a path component;
+Accepts CSV, UTF-8 delimited text, and PDF. Never trust the client-supplied filename as a
+path component;
 the staged name is always generated. The extension decides which signature check runs
 and, downstream, which extractor the batch layer selects.
 """
@@ -20,19 +21,31 @@ from .candidates import (
     FILE_TOO_LARGE,
     INVALID_SIGNATURE,
     UNSUPPORTED_FILE_TYPE,
+    UNSUPPORTED_SPREADSHEET_FORMAT,
+    UNSUPPORTED_TEXT_FORMAT,
     UPLOAD_FAILED,
     StatementSource,
 )
+from .dialects import HDFC_IN_DELIMITED, detect_adapter
 
 CHUNK_SIZE = 64 * 1024
-SUPPORTED_EXTENSIONS = {".csv", ".pdf"}
-DEFAULT_MEDIA_TYPES = {".csv": "text/csv", ".pdf": "application/pdf"}
+SUPPORTED_EXTENSIONS = {".csv", ".pdf", ".txt", ".xls"}
+DEFAULT_MEDIA_TYPES = {
+    ".csv": "text/csv",
+    ".pdf": "application/pdf",
+    ".txt": "text/plain",
+    ".xls": "application/vnd.ms-excel",
+}
 PDF_SIGNATURE = b"%PDF-"
+OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 REJECTED_MEDIA_PREFIXES = ("image/",)
 
 
 def stage_upload(
-    file: UploadFile, settings: Settings, content_length: int | None = None
+    file: UploadFile,
+    settings: Settings,
+    content_length: int | None = None,
+    password: str | None = None,
 ) -> StatementSource:
     """Streams the upload to a generated path under settings.upload_dir, hashing as it goes.
 
@@ -46,10 +59,16 @@ def stage_upload(
 
     original_filename = Path(file.filename or "upload").name
     ext = Path(original_filename).suffix.lower()
+    if ext == ".xlsx":
+        raise UploadRejected(
+            UNSUPPORTED_SPREADSHEET_FORMAT,
+            "Excel .xlsx statements are not supported; download .xls or Delimited format",
+        )
     if ext not in SUPPORTED_EXTENSIONS:
         raise UploadRejected(
             UNSUPPORTED_FILE_TYPE,
-            f"unsupported file type {ext or '(none)'!r}; only .csv and .pdf are accepted",
+            f"unsupported file type {ext or '(none)'!r}; "
+            "only .csv, .txt, .xls, and .pdf are accepted",
         )
     media_type = file.content_type or ""
     # Lowercased: a blocklist that "Image/PNG" walks straight through is not a blocklist.
@@ -88,12 +107,27 @@ def stage_upload(
         if not head.startswith(PDF_SIGNATURE):
             staged_path.unlink(missing_ok=True)
             raise UploadRejected(INVALID_SIGNATURE, "file is not a valid PDF")
+    elif ext == ".xls":
+        if not head.startswith(OLE2_SIGNATURE):
+            staged_path.unlink(missing_ok=True)
+            raise UploadRejected(INVALID_SIGNATURE, "file is not a valid Excel .xls workbook")
     else:
         try:
-            head.decode("utf-8-sig")
+            staged_path.read_text(encoding="utf-8-sig")
         except UnicodeDecodeError as exc:
             staged_path.unlink(missing_ok=True)
-            raise UploadRejected(INVALID_SIGNATURE, "file is not valid UTF-8 CSV text") from exc
+            raise UploadRejected(
+                INVALID_SIGNATURE,
+                "file is not valid UTF-8 delimited text",
+            ) from exc
+        if ext == ".txt":
+            detection = detect_adapter(staged_path, media_type)
+            if detection.dialect is not HDFC_IN_DELIMITED:
+                staged_path.unlink(missing_ok=True)
+                raise UploadRejected(
+                    UNSUPPORTED_TEXT_FORMAT,
+                    "unrecognized text statement; for HDFC, download the Delimited format",
+                )
 
     return StatementSource(
         path=staged_path,
@@ -101,6 +135,7 @@ def stage_upload(
         media_type=media_type or DEFAULT_MEDIA_TYPES[ext],
         size_bytes=total,
         sha256=digest.hexdigest(),
+        password=password,
     )
 
 
@@ -110,4 +145,7 @@ def sweep_upload_dir(settings: Settings) -> None:
         return
     for path in settings.upload_dir.iterdir():
         if path.is_file():
-            path.unlink(missing_ok=True)
+            try:
+                path.unlink(missing_ok=True)
+            except (PermissionError, OSError):
+                pass

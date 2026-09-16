@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_ai import UsageLimits
 from starlette.requests import Request
 from starlette.responses import Response
@@ -18,27 +21,50 @@ from pfa.ai.agents.categorizer import LocalTransactionClassifier
 from pfa.ai.deps import FinanceDependencies
 from pfa.ai.models import available_models
 from pfa.ai.schemas import ChatRequest, ImportRequest
+from pfa.analytics.service import cash_position, month_bounds
 from pfa.config import Settings, get_settings
-from pfa.db.models import ImportBatchModel
-from pfa.domain.errors import BatchError, UploadRejected
+from pfa.db.models import (
+    ImportBatchModel,
+    TransactionModel,
+    TransferEventModel,
+    TransferMatchDecisionModel,
+)
+from pfa.domain.accounts import AccountType
+from pfa.domain.errors import BatchError, UploadRejected, ValidationError
+from pfa.domain.transactions import (
+    SpendingCategory,
+    TransferLegRole,
+    TransferPurpose,
+    signed_minor,
+)
 from pfa.ingestion.batches import (
     BatchPatch,
+    NewAccountDraft,
     apply_patch,
     batch_candidates,
     batch_committed_transaction_ids,
     batch_counts,
     batch_issues,
+    batch_semantic_totals,
     commit_batch,
     create_batch,
     discard_batch,
     load_batch,
     sweep_expired_batches,
+    undo_batch,
 )
 from pfa.ingestion.candidates import FILE_TOO_LARGE, CandidateIssue, CandidateTransaction
 from pfa.ingestion.service import ImportService
+from pfa.ingestion.transfers import (
+    accept_suggestion,
+    create_manual_link,
+    dismiss_suggestion,
+)
 from pfa.ingestion.upload import stage_upload, sweep_upload_dir
 from pfa.observability import TimedOperation
 from pfa.services.answers import deterministic_answer
+from pfa.services.corrections import correct_transaction
+from pfa.services.fx import fetch_and_store_fx_rates
 from pfa.services.health import health_report
 from pfa.services.review import monthly_review_evidence
 from pfa.services.runtime import close_services, open_services
@@ -55,6 +81,12 @@ class TransactionResponse(BaseModel):
     kind: str
     category: str | None
     classification_source: str
+    signed_amount_minor: int
+    account_id: int
+
+
+class CategoryCorrectionRequest(BaseModel):
+    category: str
 
 
 class AccountResponse(BaseModel):
@@ -62,6 +94,27 @@ class AccountResponse(BaseModel):
     name: str
     account_type: str
     currency: str
+    institution: str | None = None
+    last4: str | None = None
+    opening_balance_minor: int = 0
+    opening_balance_as_of: date | None = None
+    active: bool = True
+
+
+class NewAccountRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    account_type: AccountType = AccountType.CURRENT
+    currency: str = Field(default="GBP", min_length=3, max_length=3)
+    institution: str | None = Field(default=None, max_length=120)
+    last4: str | None = Field(default=None, min_length=4, max_length=4, pattern=r"^\d{4}$")
+    opening_balance_minor: int = 0
+    opening_balance_as_of: date | None = None
+    opening_balance_confirmed: bool = False
+    currency_confirmed: bool = False
+
+
+class AccountMetadataUpdateRequest(BaseModel):
+    institution: str = Field(min_length=1, max_length=120)
 
 
 class CandidateIssueResponse(BaseModel):
@@ -78,8 +131,11 @@ class CandidateResponse(BaseModel):
     normalized_description: str
     amount_minor: int | None
     direction: str | None
+    direction_explicit: bool
     currency: str
     account_hint: str | None
+    account_id: int | None
+    signed_amount_minor: int | None
     external_id: str | None
     kind: str | None
     category: str | None
@@ -104,6 +160,18 @@ class ImportBatchResponse(BaseModel):
     sha256: str
     extractor: str
     destination_account: str | None
+    destination_account_id: int | None
+    new_account: NewAccountRequest | None
+    adapter_id: str | None
+    detection_confidence: float | None
+    detection_reason_codes: list[str]
+    detected_institution: str | None
+    detected_account_hint: str | None
+    suggested_currency: str | None
+    currency_evidence: str | None
+    compatible_account_types: list[str]
+    reconciliation: dict[str, object] | None
+    semantic_totals: dict[str, int]
     amount_sign: str | None
     detected_account: str | None
     detected_currency: str | None
@@ -121,17 +189,93 @@ class ImportBatchResponse(BaseModel):
 
 
 class ImportBatchPatchRequest(BaseModel):
-    account: str | None = None
+    account: str | None = None  # deprecated label compatibility
+    destination_account_id: int | None = Field(default=None, gt=0)
+    new_account: NewAccountRequest | None = None
+    account_metadata_update: AccountMetadataUpdateRequest | None = None
     excluded_candidate_ids: list[str] | None = None
+
+    @model_validator(mode="after")
+    def one_binding(self) -> ImportBatchPatchRequest:
+        if self.destination_account_id is not None and self.new_account is not None:
+            raise ValueError("choose destination_account_id or new_account, not both")
+        if self.account is not None and (
+            self.destination_account_id is not None
+            or self.new_account is not None
+            or self.account_metadata_update is not None
+        ):
+            raise ValueError("account is a legacy alias; use one stable binding")
+        if self.account_metadata_update is not None and self.destination_account_id is None:
+            raise ValueError("account_metadata_update requires destination_account_id")
+        return self
+
     # Both are closed sets: an unrecognised value is a 422, not a silent no-op.
     amount_mode: Literal["debit", "credit"] | None = None
     amount_sign: Literal["as_written", "debit_positive"] | None = None
+
+
+class UndoImportRequest(BaseModel):
+    confirm_changed: bool = False
+
+
+class TransferLegRequest(BaseModel):
+    transaction_id: int = Field(gt=0)
+    role: TransferLegRole
+
+
+class TransferLinkRequest(BaseModel):
+    legs: list[TransferLegRequest] = Field(min_length=2)
+    purpose: str = TransferPurpose.OTHER.value
+
+
+class TransferSuggestionResponse(BaseModel):
+    id: int
+    left_transaction_id: int
+    right_transaction_id: int
+    state: str
+    confidence: float
+    reason_codes: list[str]
+    event_id: int | None
+
+
+class TransferLegResponse(BaseModel):
+    transaction_id: int
+    role: str
+
+
+class TransferEventResponse(BaseModel):
+    id: int
+    purpose: str
+    match_method: str
+    legs: list[TransferLegResponse]
 
 
 class ScenarioRequest(BaseModel):
     cost_minor: int = Field(ge=0)
     horizon_months: int = Field(default=3, ge=1, le=120)
     month: str | None = None
+    currency: str = "GBP"
+
+
+class FxRateResponse(BaseModel):
+    id: int
+    base_currency: str
+    quote_currency: str
+    rate: str  # decimal string - never float; see domain/fx.py
+    effective_at: date
+    source: str | None = None
+
+
+class FxRateSetRequest(BaseModel):
+    base_currency: str
+    quote_currency: str
+    rate: str  # decimal string - never float; see domain/fx.py
+    effective_at: date | None = None
+
+
+class FxFetchRequest(BaseModel):
+    base_currency: str = "GBP"
+    on_date: date | None = None
 
 
 def _issue_response(issue: CandidateIssue) -> CandidateIssueResponse:
@@ -147,8 +291,11 @@ def _candidate_response(candidate: CandidateTransaction) -> CandidateResponse:
         normalized_description=candidate.normalized_description,
         amount_minor=candidate.amount_minor,
         direction=candidate.direction,
+        direction_explicit=candidate.direction_explicit,
         currency=candidate.currency,
         account_hint=candidate.account_hint,
+        account_id=candidate.account_id,
+        signed_amount_minor=candidate.signed_amount_minor,
         external_id=candidate.external_id,
         kind=candidate.kind,
         category=candidate.category,
@@ -175,6 +322,32 @@ def _batch_response(batch: ImportBatchModel) -> ImportBatchResponse:
         sha256=batch.sha256,
         extractor=batch.extractor,
         destination_account=batch.destination_account,
+        destination_account_id=batch.destination_account_id,
+        new_account=(
+            NewAccountRequest(**json.loads(batch.new_account_json))
+            if batch.new_account_json
+            else None
+        ),
+        adapter_id=batch.adapter_id,
+        detection_confidence=batch.detection_confidence,
+        detection_reason_codes=(
+            json.loads(batch.detection_reason_codes_json)
+            if batch.detection_reason_codes_json
+            else []
+        ),
+        detected_institution=batch.detected_institution,
+        detected_account_hint=batch.detected_account_hint,
+        suggested_currency=batch.suggested_currency,
+        currency_evidence=batch.currency_evidence,
+        compatible_account_types=(
+            json.loads(batch.compatible_account_types_json)
+            if batch.compatible_account_types_json
+            else []
+        ),
+        reconciliation=(
+            json.loads(batch.reconciliation_json) if batch.reconciliation_json else None
+        ),
+        semantic_totals=batch_semantic_totals(batch),
         amount_sign=batch.amount_sign,
         detected_account=batch.detected_account,
         detected_currency=batch.detected_currency,
@@ -260,13 +433,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request,
         file: UploadFile = File(...),  # noqa: B008 - FastAPI's dependency-injection idiom
         account: str | None = Form(None),  # noqa: B008
+        destination_account_id: int | None = Form(None),  # noqa: B008
+        new_account_name: str | None = Form(None),  # noqa: B008
+        new_account_type: AccountType = Form(AccountType.CURRENT),  # noqa: B008
+        new_account_currency: str = Form("GBP"),  # noqa: B008
+        password: str | None = Form(None),  # noqa: B008
     ) -> ImportBatchResponse:
         content_length = request.headers.get("content-length")
         # A header the client controls must not be able to turn a bad request into a 500;
         # an unparseable one just means the size cap falls back to the copy loop.
         declared_size = int(content_length) if content_length and content_length.isdigit() else None
         try:
-            source = stage_upload(file, active_settings, declared_size)
+            source = stage_upload(file, active_settings, declared_size, password=password)
         except UploadRejected as exc:
             status_code = _UPLOAD_ERROR_STATUS.get(exc.code, 422)
             raise HTTPException(
@@ -276,7 +454,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             engine, services = open_services(active_settings)
             try:
-                batch = create_batch(services.uow, source, active_settings, account=account)
+                draft = (
+                    NewAccountRequest(
+                        name=new_account_name,
+                        account_type=new_account_type,
+                        currency=new_account_currency,
+                    )
+                    if new_account_name
+                    else None
+                )
+                batch = create_batch(
+                    services.uow,
+                    source,
+                    active_settings,
+                    account=account,
+                    destination_account_id=destination_account_id,
+                    new_account=NewAccountDraft(**draft.model_dump()) if draft else None,
+                )
                 response = _batch_response(batch)
                 close_services(engine, services)
                 return response
@@ -285,11 +479,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise
         finally:
             # open_services() belongs inside this boundary: a database that won't open
-            # must not strand the staged statement. The unlink can still lose to a
-            # timed-out extraction thread holding the file open (Windows); _run_extraction
-            # owns cleanup in that case, so a failed unlink here is not an error.
+            # must not strand the staged statement. CSV/HDFC timeout cleanup may still
+            # race a parser thread on Windows; PDF workers are terminated before return.
             with suppress(OSError):
                 source.path.unlink(missing_ok=True)
+
+    @app.get("/imports", response_model=list[ImportBatchResponse])
+    def list_import_batches(
+        limit: int = 50,
+        status: str | None = None,
+    ) -> list[ImportBatchResponse]:
+        engine, services = open_services(active_settings)
+        try:
+            batches = services.uow.import_batches.list(limit=limit, status=status)
+            responses = [_batch_response(batch) for batch in batches]
+            close_services(engine, services)
+            return responses
+        except Exception:
+            close_services(engine, services, False)
+            raise
 
     @app.get("/imports/{batch_id}", response_model=ImportBatchResponse)
     def get_import_batch(batch_id: str) -> ImportBatchResponse:
@@ -317,7 +525,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 batch_id,
                 BatchPatch(
                     account=request.account,
+                    destination_account_id=request.destination_account_id,
+                    new_account=(
+                        NewAccountDraft(**request.new_account.model_dump())
+                        if request.new_account
+                        else None
+                    ),
                     excluded_candidate_ids=request.excluded_candidate_ids,
+                    account_metadata_update=(
+                        request.account_metadata_update.model_dump()
+                        if request.account_metadata_update
+                        else None
+                    ),
                     amount_mode=request.amount_mode,
                     amount_sign=request.amount_sign,
                 ),
@@ -339,6 +558,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         engine, services = open_services(active_settings)
         try:
             batch = commit_batch(services.uow, batch_id, active_settings)
+            response = _batch_response(batch)
+            close_services(engine, services)
+            return response
+        except BatchError as exc:
+            close_services(engine, services, False)
+            raise HTTPException(
+                status_code=exc.status_code, detail={"code": exc.code, "message": exc.message}
+            ) from exc
+        except Exception:
+            close_services(engine, services, False)
+            raise
+
+    @app.post("/imports/{batch_id}/undo", response_model=ImportBatchResponse)
+    def undo_import_batch(
+        batch_id: str, request: UndoImportRequest | None = None
+    ) -> ImportBatchResponse:
+        engine, services = open_services(active_settings)
+        try:
+            batch = undo_batch(
+                services.uow,
+                batch_id,
+                confirm_changed=request.confirm_changed if request else False,
+            )
             response = _batch_response(batch)
             close_services(engine, services)
             return response
@@ -374,61 +616,348 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             return [
                 AccountResponse(
-                    id=acc.id, name=acc.name, account_type=acc.account_type, currency=acc.currency
+                    id=acc.id,
+                    name=acc.name,
+                    account_type=acc.account_type,
+                    currency=acc.currency,
+                    institution=acc.institution,
+                    last4=acc.last4,
+                    opening_balance_minor=acc.opening_balance_minor,
+                    opening_balance_as_of=acc.opening_balance_as_of,
+                    active=acc.active,
                 )
                 for acc in services.uow.accounts.all()
             ]
         finally:
             close_services(engine, services)
 
-    @app.get("/transactions", response_model=list[TransactionResponse])
-    def transactions(
-        limit: Annotated[int, Query(ge=1, le=500)] = 100,
-    ) -> list[TransactionResponse]:
+    @app.post("/accounts", response_model=AccountResponse)
+    def create_account(request: NewAccountRequest) -> AccountResponse:
         engine, services = open_services(active_settings)
         try:
-            rows = services.uow.transactions.all()[-limit:]
+            account = services.uow.accounts.create(
+                request.name,
+                request.currency,
+                request.account_type.value,
+                institution=request.institution,
+                last4=request.last4,
+                opening_balance_minor=request.opening_balance_minor,
+                opening_balance_as_of=request.opening_balance_as_of,
+            )
+            response = AccountResponse(
+                id=account.id,
+                name=account.name,
+                account_type=account.account_type,
+                currency=account.currency,
+                institution=account.institution,
+                last4=account.last4,
+                opening_balance_minor=account.opening_balance_minor,
+                opening_balance_as_of=account.opening_balance_as_of,
+                active=account.active,
+            )
+            close_services(engine, services)
+            return response
+        except ValueError as exc:
+            close_services(engine, services, False)
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception:
+            close_services(engine, services, False)
+            raise
+
+    @app.get("/transactions", response_model=list[TransactionResponse])
+    def transactions(
+        month: str | None = None,
+        account_id: int | None = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    ) -> list[TransactionResponse]:
+        start = end = None
+        if month:
+            start, end = month_bounds(_month(month))
+        engine, services = open_services(active_settings)
+        try:
+            rows = services.uow.transactions.query(
+                start=start,
+                end=end,
+                account_id=account_id,
+                limit=limit,
+            )
+            return [_tx_response(row) for row in rows]
+        finally:
+            close_services(engine, services)
+
+    @app.get("/transactions/months")
+    def transaction_months(currency: str | None = None) -> list[str]:
+        engine, services = open_services(active_settings)
+        try:
+            return services.uow.transactions.months(currency)
+        finally:
+            close_services(engine, services)
+
+    def _tx_response(row: TransactionModel) -> TransactionResponse:
+        return TransactionResponse(
+            id=row.id,
+            date=row.transaction_date,
+            description=row.raw_description,
+            merchant=row.merchant,
+            amount_minor=row.amount_minor,
+            flow_direction=row.flow_direction,
+            currency=row.currency,
+            kind=row.kind,
+            category=row.category,
+            classification_source=row.classification_source,
+            signed_amount_minor=signed_minor(row.amount_minor, row.flow_direction),
+            account_id=row.account_id,
+        )
+
+    @app.get("/categories")
+    def list_categories() -> list[str]:
+        return [c.value for c in SpendingCategory]
+
+    @app.patch("/transactions/{transaction_id}", response_model=TransactionResponse)
+    def correct_transaction_category(
+        transaction_id: int, request: CategoryCorrectionRequest
+    ) -> TransactionResponse:
+        try:
+            category = SpendingCategory(request.category)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422, detail=f"unknown category {request.category!r}"
+            ) from exc
+        engine, services = open_services(active_settings)
+        try:
+            row = correct_transaction(services.uow, transaction_id, category)
+            response = _tx_response(row)
+            close_services(engine, services)
+            return response
+        except ValidationError as exc:
+            close_services(engine, services, False)
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception:
+            close_services(engine, services, False)
+            raise
+
+    def _suggestion_response(
+        decision: TransferMatchDecisionModel,
+    ) -> TransferSuggestionResponse:
+        return TransferSuggestionResponse(
+            id=decision.id,
+            left_transaction_id=decision.left_transaction_id,
+            right_transaction_id=decision.right_transaction_id,
+            state=decision.state,
+            confidence=decision.confidence,
+            reason_codes=json.loads(decision.reason_codes_json),
+            event_id=decision.event_id,
+        )
+
+    def _event_response(event: TransferEventModel) -> TransferEventResponse:
+        return TransferEventResponse(
+            id=event.id,
+            purpose=event.purpose,
+            match_method=event.match_method,
+            legs=[
+                TransferLegResponse(transaction_id=leg.transaction_id, role=leg.role)
+                for leg in event.legs
+            ],
+        )
+
+    @app.get("/analytics/cash")
+    def cash(currency: str = "GBP", as_of: date | None = None) -> dict[str, object]:
+        engine, services = open_services(active_settings)
+        try:
+            position = cash_position(
+                services.uow.accounts.all(), services.uow.transactions.all(), currency, as_of
+            )
+            return {
+                "currency": position.currency,
+                "as_of": as_of,
+                "cash_minor": position.total_minor,
+                "known_subtotal_minor": position.known_subtotal_minor,
+                "coverage_status": position.coverage_status,
+                "missing_account_ids": list(position.missing_account_ids),
+            }
+        finally:
+            close_services(engine, services)
+
+    @app.get("/transfers/suggestions", response_model=list[TransferSuggestionResponse])
+    def transfer_suggestions() -> list[TransferSuggestionResponse]:
+        engine, services = open_services(active_settings)
+        try:
+            return [_suggestion_response(item) for item in services.uow.transfers.suggestions()]
+        finally:
+            close_services(engine, services)
+
+    @app.post("/transfers/suggestions/{decision_id}/accept", response_model=TransferEventResponse)
+    def accept_transfer_suggestion(decision_id: int) -> TransferEventResponse:
+        engine, services = open_services(active_settings)
+        try:
+            event = accept_suggestion(services.uow, decision_id)
+            response = _event_response(event)
+            close_services(engine, services)
+            return response
+        except BatchError as exc:
+            close_services(engine, services, False)
+            raise HTTPException(
+                status_code=exc.status_code, detail={"code": exc.code, "message": exc.message}
+            ) from exc
+
+    @app.post(
+        "/transfers/suggestions/{decision_id}/dismiss", response_model=TransferSuggestionResponse
+    )
+    def dismiss_transfer_suggestion(decision_id: int) -> TransferSuggestionResponse:
+        engine, services = open_services(active_settings)
+        try:
+            decision = dismiss_suggestion(services.uow, decision_id)
+            response = _suggestion_response(decision)
+            close_services(engine, services)
+            return response
+        except BatchError as exc:
+            close_services(engine, services, False)
+            raise HTTPException(
+                status_code=exc.status_code, detail={"code": exc.code, "message": exc.message}
+            ) from exc
+
+    @app.post("/transfers/link", response_model=TransferEventResponse)
+    def link_transfer(request: TransferLinkRequest) -> TransferEventResponse:
+        engine, services = open_services(active_settings)
+        try:
+            event = create_manual_link(
+                services.uow,
+                [(leg.transaction_id, leg.role.value) for leg in request.legs],
+                request.purpose,
+            )
+            response = _event_response(event)
+            close_services(engine, services)
+            return response
+        except BatchError as exc:
+            close_services(engine, services, False)
+            raise HTTPException(
+                status_code=exc.status_code, detail={"code": exc.code, "message": exc.message}
+            ) from exc
+
+    @app.delete("/transfers/events/{event_id}")
+    def unlink_transfer(event_id: int) -> dict[str, object]:
+        engine, services = open_services(active_settings)
+        try:
+            event = services.uow.transfers.get_event(event_id)
+            if event is None:
+                raise BatchError("TRANSFER_EVENT_NOT_FOUND", "transfer event not found", 404)
+            services.uow.transfers.delete_event(event_id)
+            close_services(engine, services)
+            return {"id": event_id, "unlinked": True}
+        except BatchError as exc:
+            close_services(engine, services, False)
+            raise HTTPException(
+                status_code=exc.status_code, detail={"code": exc.code, "message": exc.message}
+            ) from exc
+
+    @app.get("/fx/rates", response_model=list[FxRateResponse])
+    def get_fx_rates(
+        base: str | None = None,
+        quote: str | None = None,
+    ) -> list[FxRateResponse]:
+        engine, services = open_services(active_settings)
+        try:
+            rates = services.uow.fx_rates.all()
+            if base:
+                rates = [r for r in rates if r.base_currency == base.upper()]
+            if quote:
+                rates = [r for r in rates if r.quote_currency == quote.upper()]
             return [
-                TransactionResponse(
-                    id=row.id,
-                    date=row.transaction_date,
-                    description=row.raw_description,
-                    merchant=row.merchant,
-                    amount_minor=row.amount_minor,
-                    flow_direction=row.flow_direction,
-                    currency=row.currency,
-                    kind=row.kind,
-                    category=row.category,
-                    classification_source=row.classification_source,
+                FxRateResponse(
+                    id=r.id,
+                    base_currency=r.base_currency,
+                    quote_currency=r.quote_currency,
+                    rate=r.rate,
+                    effective_at=r.effective_at,
+                    source=r.source,
                 )
-                for row in rows
+                for r in rates
             ]
         finally:
             close_services(engine, services)
 
-    @app.get("/analytics/monthly")
-    def monthly(month: str | None = None) -> dict[str, object]:
+    @app.post("/fx/rates", response_model=FxRateResponse)
+    def set_fx_rate(request: FxRateSetRequest) -> FxRateResponse:
+        try:
+            rate = Decimal(request.rate)
+        except InvalidOperation as exc:
+            raise HTTPException(status_code=422, detail=f"invalid rate {request.rate!r}") from exc
         engine, services = open_services(active_settings)
         try:
-            return services.analytics.monthly_summary(_month(month)).model_dump()
+            effective_at = request.effective_at or date.today()
+            model = services.uow.fx_rates.set_rate(
+                request.base_currency.upper(),
+                request.quote_currency.upper(),
+                rate,
+                effective_at=effective_at,
+            )
+            response = FxRateResponse(
+                id=model.id,
+                base_currency=model.base_currency,
+                quote_currency=model.quote_currency,
+                rate=model.rate,
+                effective_at=model.effective_at,
+                source=model.source,
+            )
+            close_services(engine, services)
+            return response
+        except Exception:
+            close_services(engine, services, False)
+            raise
+
+    @app.post("/fx/fetch", response_model=list[FxRateResponse])
+    def fetch_fx_rates(request: FxFetchRequest) -> list[FxRateResponse]:
+        engine, services = open_services(active_settings)
+        try:
+            models = fetch_and_store_fx_rates(
+                services.uow,
+                base_currency=request.base_currency.upper(),
+                on_date=request.on_date or date.today(),
+            )
+            response = [
+                FxRateResponse(
+                    id=m.id,
+                    base_currency=m.base_currency,
+                    quote_currency=m.quote_currency,
+                    rate=m.rate,
+                    effective_at=m.effective_at,
+                    source=m.source,
+                )
+                for m in models
+            ]
+            close_services(engine, services)
+            return response
+        except Exception:
+            close_services(engine, services, False)
+            raise
+
+    @app.get("/analytics/monthly")
+    def monthly(month: str | None = None, currency: str = "GBP") -> dict[str, object]:
+        engine, services = open_services(active_settings)
+        try:
+            return services.analytics.monthly_summary(_month(month), currency=currency).model_dump()
         finally:
             close_services(engine, services)
 
     @app.get("/analytics/categories")
-    def categories(month: str | None = None) -> list[dict[str, object]]:
+    def categories(month: str | None = None, currency: str = "GBP") -> list[dict[str, object]]:
         engine, services = open_services(active_settings)
         try:
             return [
-                item.model_dump() for item in services.analytics.category_spending(_month(month))
+                item.model_dump()
+                for item in services.analytics.category_spending(_month(month), currency=currency)
             ]
         finally:
             close_services(engine, services)
 
     @app.get("/budgets")
-    def budgets(month: str | None = None) -> list[dict[str, object]]:
+    def budgets(month: str | None = None, currency: str = "GBP") -> list[dict[str, object]]:
         engine, services = open_services(active_settings)
         try:
-            return [item.model_dump() for item in services.analytics.budget_status(_month(month))]
+            return [
+                item.model_dump()
+                for item in services.analytics.budget_status(_month(month), currency=currency)
+            ]
         finally:
             close_services(engine, services)
 
@@ -445,7 +974,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         engine, services = open_services(active_settings)
         try:
             return services.planning.simulate_purchase(
-                request.cost_minor, request.horizon_months, _month(request.month)
+                request.cost_minor,
+                request.horizon_months,
+                _month(request.month),
+                currency=request.currency,
             ).model_dump()
         finally:
             close_services(engine, services)
@@ -455,7 +987,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         engine, services = open_services(active_settings)
         try:
             deterministic = deterministic_answer(
-                services.analytics, services.planning, request.message
+                services.analytics, services.planning, request.message, currency=request.currency
             )
             if deterministic:
                 return {"answer": deterministic}
@@ -481,16 +1013,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             close_services(engine, services)
 
     @app.get("/reviews/monthly")
-    def review(month: str | None = None) -> dict[str, object]:
+    def review(month: str | None = None, currency: str = "GBP") -> dict[str, object]:
         engine, services = open_services(active_settings)
         try:
-            return monthly_review_evidence(services.analytics, _month(month))
+            return monthly_review_evidence(services.analytics, _month(month), currency=currency)
         finally:
             close_services(engine, services)
 
     @app.get("/", include_in_schema=False)
     def dashboard() -> Response:
         html = (web_root / "index.html").read_text(encoding="utf-8")
+        # Rewrite the static asset cache-buster to the newest asset mtime so an
+        # edited app.js/styles.css actually reaches the browser. The checked-in
+        # "?t=178837" token never changed, so cached bundles went stale.
+        try:
+            token = str(
+                int(max((web_root / name).stat().st_mtime for name in ("app.js", "styles.css")))
+            )
+            html = re.sub(r"(app\.js|styles\.css)\?t=\d+", rf"\1?t={token}", html)
+        except OSError:
+            pass
         return Response(html, media_type="text/html")
 
     return app

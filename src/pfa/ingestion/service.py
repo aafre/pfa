@@ -8,7 +8,9 @@ from typing import Protocol
 
 from pfa.db.models import MerchantRuleModel, TransactionModel
 from pfa.db.unit_of_work import UnitOfWork
+from pfa.domain.accounts import AccountType
 from pfa.domain.errors import ImportRowError
+from pfa.domain.money import SUPPORTED_CURRENCIES
 from pfa.domain.transactions import (
     ClassificationSource,
     SpendingCategory,
@@ -18,6 +20,7 @@ from pfa.domain.transactions import (
 from pfa.observability import TimedOperation
 
 from .candidates import (
+    CURRENCY_ACCOUNT_MISMATCH,
     DUPLICATE_ROW,
     ERROR,
     INVALID_AMOUNT,
@@ -62,7 +65,11 @@ def _non_member(value: str, enum: type[StrEnum]) -> str | None:
 
 
 def _classification(
-    candidate: CandidateTransaction, sign: int, classifier: Classifier | None
+    candidate: CandidateTransaction,
+    sign: int,
+    classifier: Classifier | None,
+    account_type: AccountType | str | None = None,
+    owned_card: bool = False,
 ) -> Classification:
     if candidate.kind:
         return Classification(
@@ -73,7 +80,12 @@ def _classification(
             None,
             "source-provided classification",
         )
-    known = classify_known(candidate.raw_description)
+    known = classify_known(
+        candidate.raw_description,
+        account_type=account_type,
+        canonical_sign=sign * (candidate.amount_minor or 0),
+        owned_card=owned_card,
+    )
     if known:
         return known
     if classifier:
@@ -84,7 +96,9 @@ def _classification(
             return result
     return Classification(
         TransactionKind.EXPENSE if sign < 0 else TransactionKind.INCOME,
-        source=ClassificationSource.UNKNOWN,
+        # The row came from an import even when classification remains unresolved.
+        # Keep provenance truthful so the UI does not imply an unknown data origin.
+        source=ClassificationSource.IMPORT,
         confidence=None,
         reason="requires review",
     )
@@ -102,27 +116,34 @@ def _classification_from_rule(rule: MerchantRuleModel) -> Classification:
 
 
 def _validate_candidate(candidate: CandidateTransaction) -> None:
+    if not candidate.transaction_date:
+        candidate.add_issue(INVALID_DATE, "missing transaction date")
+        return
     try:
-        parse_date(candidate.transaction_date or "")
+        parse_date(candidate.transaction_date)
     except ImportRowError as exc:
         candidate.add_issue(INVALID_DATE, str(exc))
         return
-    if not candidate.raw_description:
+    if not candidate.raw_description.strip():
         candidate.add_issue(MISSING_DESCRIPTION, "missing description")
         return
     if candidate.amount_minor is None:
         try:
-            sign, amount_minor = parse_amount(candidate.raw_fields.get("amount", ""))
+            sign, amount_minor, is_explicit_credit = parse_amount(
+                candidate.raw_fields.get("amount", ""), candidate.currency
+            )
         except ImportRowError as exc:
             candidate.add_issue(INVALID_AMOUNT, str(exc))
             return
         candidate.amount_minor = amount_minor
         candidate.direction = "debit" if sign < 0 else "credit"
+        candidate.direction_explicit = is_explicit_credit
     candidate.normalized_description = normalize_description(candidate.raw_description)
-    if candidate.currency != "GBP":
+    if candidate.currency.upper() not in SUPPORTED_CURRENCIES:
+        supported = ", ".join(sorted(SUPPORTED_CURRENCIES))
         candidate.add_issue(
             UNSUPPORTED_CURRENCY,
-            f"unsupported currency {candidate.currency!r}; PFA v0.1 supports GBP only",
+            f"unsupported currency {candidate.currency!r}; supported: {supported}",
         )
         return
     if candidate.posted_date:
@@ -154,6 +175,21 @@ class ImportService:
         for candidate in candidates:
             if candidate.state != ERROR:
                 _validate_candidate(candidate)
+            if candidate.state != ERROR and candidate.account_hint:
+                # Only an *existing* account can disagree with the row - a brand-new
+                # account takes its currency from the first candidate that names it, at
+                # commit time, so there is nothing to compare against yet.
+                account = (
+                    self.uow.accounts.get(candidate.account_id)
+                    if candidate.account_id is not None
+                    else self.uow.accounts.get_by_name(candidate.account_hint)
+                )
+                if account is not None and account.currency.upper() != candidate.currency.upper():
+                    candidate.add_issue(
+                        CURRENCY_ACCOUNT_MISMATCH,
+                        f"row currency {candidate.currency} does not match "
+                        f"{account.name}'s account currency {account.currency}",
+                    )
 
     def resolve_duplicates(self, candidates: Sequence[CandidateTransaction]) -> None:
         """Fingerprints valid rows, occurrence-aware, and matches them against the ledger."""
@@ -164,7 +200,7 @@ class ImportService:
             if candidate.state == ERROR or signed is None:
                 continue
             key = (
-                candidate.account_hint or "Main account",
+                str(candidate.account_id or candidate.account_hint or "Main account"),
                 candidate.transaction_date or "",
                 signed,
                 candidate.currency,
@@ -177,6 +213,16 @@ class ImportService:
                 1 if candidate.external_id else occurrences[key],
             )
             existing = self.uow.transactions.find_fingerprint(candidate.fingerprint)
+            if existing is None and candidate.account_id is not None and candidate.account_hint:
+                # Legacy imports fingerprinted the display label before stable account IDs
+                # existed; accept that one-way compatibility match during migration.
+                legacy_fingerprint = transaction_fingerprint(
+                    candidate.account_hint,
+                    *key[1:],
+                    candidate.external_id,
+                    1 if candidate.external_id else occurrences[key],
+                )
+                existing = self.uow.transactions.find_fingerprint(legacy_fingerprint)
             candidate.duplicate_of = existing.id if existing else None
             if existing:
                 candidate.add_issue(
@@ -188,25 +234,57 @@ class ImportService:
         candidates: Sequence[CandidateTransaction],
         *,
         source_label: str,
+        destination_account_id: int | None = None,
         dry_run: bool = False,
     ) -> list[TransactionModel]:
         """Persists included, non-duplicate, non-error rows."""
         committed: list[TransactionModel] = []
+        destination = (
+            self.uow.accounts.get(destination_account_id)
+            if destination_account_id is not None
+            else None
+        )
+        owned_card = any(
+            AccountType(account.account_type) == AccountType.CREDIT_CARD
+            for account in self.uow.accounts.all()
+        )
         for candidate in candidates:
             if not candidate.included or candidate.state == ERROR:
                 continue
             if candidate.duplicate_of is not None or candidate.amount_minor is None:
                 continue
             sign = -1 if candidate.direction == "debit" else 1
+            account = destination or (
+                self.uow.accounts.get(candidate.account_id)
+                if candidate.account_id is not None
+                else self.uow.accounts.get_or_create(
+                    candidate.account_hint or "Main account", candidate.currency
+                )
+            )
+            if account is None:
+                continue
             rule = self.uow.rules.match(candidate.normalized_description)
             classification = (
                 _classification_from_rule(rule)
                 if rule
-                else _classification(candidate, sign, self.classifier)
+                else _classification(
+                    candidate,
+                    sign,
+                    self.classifier,
+                    account_type=account.account_type,
+                    owned_card=owned_card,
+                )
             )
-            account = self.uow.accounts.get_or_create(
-                candidate.account_hint or "Main account", candidate.currency
-            )
+            if account.currency.upper() != candidate.currency.upper():
+                # validate() already blocks this for an existing account at preview time;
+                # reaching it here means a caller committed without validating first. Skip
+                # rather than raise - a currency mismatch must never crash a commit.
+                candidate.add_issue(
+                    CURRENCY_ACCOUNT_MISMATCH,
+                    f"row currency {candidate.currency} does not match "
+                    f"{account.name}'s account currency {account.currency}",
+                )
+                continue
             transaction = TransactionModel(
                 external_id=candidate.external_id,
                 account_id=account.id,

@@ -11,6 +11,7 @@ from fixtures.pdf_builder import Placement, build_pdf, statement_page  # noqa: E
 
 from pfa.ingestion import candidates as codes  # noqa: E402
 from pfa.ingestion.candidates import ExtractionResult, StatementSource  # noqa: E402
+from pfa.ingestion.dialects import BARCLAYCARD  # noqa: E402
 from pfa.ingestion.extractors.pdf import PdfStatementExtractor  # noqa: E402
 
 
@@ -111,7 +112,7 @@ def test_continuation_line_far_from_any_row_is_dropped_as_noise(tmp_path: Path) 
     assert result.candidates[0].raw_description == "Tesco Metro"
 
 
-def test_amex_banner_header_does_not_turn_statement_chatter_into_candidates(
+def test_amex_banner_header_and_statement_chatter_never_become_candidates(
     tmp_path: Path,
 ) -> None:
     columns = [72.0, 160.0, 300.0, 420.0, 500.0]
@@ -129,8 +130,22 @@ def test_amex_banner_header_does_not_turn_statement_chatter_into_candidates(
 
     result = _extract(tmp_path, [statement_page(rows, columns)])
 
-    assert [(c.transaction_date, c.raw_description) for c in result.candidates] == []
-    assert [issue.code for issue in result.issues] == [codes.PDF_NOT_EXTRACTABLE]
+    assert [(c.transaction_date, c.amount_minor) for c in result.candidates] == [
+        ("Jul31", 194064),
+        ("Jul21", 630),
+    ]
+    assert result.issues == []
+    # The repeated "Date" column (AMEX prints it twice) never leaks into the description.
+    assert [c.raw_description for c in result.candidates] == [
+        "PAYMENT RECEIVED - THANK YOU",
+        "ZETTLE *REDACTED",
+    ]
+    # The own-line "CR" marker attaches to the row above it, not a candidate of its own,
+    # and marks that row's direction explicit so a later sign convention cannot flip it.
+    payment, purchase = result.candidates
+    assert payment.direction == "credit"
+    assert payment.direction_explicit is True
+    assert purchase.direction_explicit is False
 
 
 def test_header_with_zero_plausible_data_rows_reports_pdf_not_extractable(
@@ -266,7 +281,7 @@ def test_no_recognizable_rows_reports_pdf_not_extractable_with_actionable_copy(
 
 def test_money_out_and_money_in_headers_are_recognised(tmp_path: Path) -> None:
     # Monzo, Starling and Lloyds all label their columns this way. The CSV extractor has
-    # always known the wording; the PDF map did not, until both read one shared table.
+    # always known the wording; this proves the PDF word-based header map reads it too.
     columns = [72.0, 160.0, 320.0, 420.0]
     rows = [
         ["Date", "Description", "Money Out", "Money In"],
@@ -278,3 +293,31 @@ def test_money_out_and_money_in_headers_are_recognised(tmp_path: Path) -> None:
     assert result.issues == []
     assert [c.amount_minor for c in result.candidates] == [1250, 300000]
     assert [c.direction for c in result.candidates] == ["debit", "credit"]
+
+
+def test_barclaycard_two_column_layout_clustering(tmp_path: Path) -> None:
+    # Left column: transactions at x ~ 50..280
+    # Right column: marketing copy at x ~ 350..550
+    left_columns = [50.0, 130.0, 260.0]
+    left_rows = [
+        ["Date", "Description", "Amount"],
+        ["27 Jul 25", "COFFEE HOUSE LONDON", "-3.50"],
+        ["28 Jul 25", "NEWSAGENT LEEDS", "-2.10"],
+    ]
+
+    page = statement_page(left_rows, left_columns)
+    # Add right column marketing words at same y positions
+    page.append((360.0, 720.0, "Understanding your interest", 10.0))
+    page.append((360.0, 706.0, "Your interest rates this month", 10.0))
+    page.append((360.0, 692.0, "Visit barclaycard.co.uk", 10.0))
+
+    result = _extract(tmp_path, [page], dialect=BARCLAYCARD)
+
+    assert result.issues == []
+    assert len(result.candidates) == 2
+    assert [c.transaction_date for c in result.candidates] == ["27 Jul 25", "28 Jul 25"]
+    assert [c.raw_description for c in result.candidates] == [
+        "COFFEE HOUSE LONDON",
+        "NEWSAGENT LEEDS",
+    ]
+    assert [c.amount_minor for c in result.candidates] == [350, 210]

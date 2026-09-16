@@ -23,7 +23,7 @@ def open_services(settings: Settings) -> tuple[Engine, FinanceServices]:
     session = make_session_factory(engine)()
     try:
         uow = UnitOfWork(session)
-        analytics = AnalyticsService(uow.transactions, uow.budgets, uow.goals)
+        analytics = AnalyticsService(uow.transactions, uow.budgets, uow.goals, uow.accounts)
         planning = PlanningService(analytics, uow.accounts.all(), uow.transactions.all())
         return engine, FinanceServices(uow, analytics, planning)
     except Exception:

@@ -25,7 +25,10 @@ class MonthlySummary(BaseModel):
     discretionary_spending_minor: int = 0
     savings_minor: int = 0
     investments_minor: int = 0
+    # Deprecated compatibility field; it retains the historical debt-cost meaning.
     debt_payments_minor: int = 0
+    debt_repayments_minor: int = 0
+    debt_costs_minor: int = 0
     net_cashflow_minor: int = 0
     savings_rate_percent: float = 0.0
     transaction_count: int = 0

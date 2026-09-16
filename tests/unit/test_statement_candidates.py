@@ -29,7 +29,7 @@ def test_validation_reports_one_issue_code_per_blocking_problem() -> None:
         candidate("c1", transaction_date="not-a-date"),
         candidate("c2", raw_description=""),
         candidate("c3", amount="not-a-number"),
-        candidate("c4", currency="EUR"),
+        candidate("c4", currency="XYZ"),
         candidate("c5", kind="teleportation"),
         candidate("c6", kind="expense", category="submarines"),
         candidate("c7", kind="transfer", transfer_purpose="hoarding"),

@@ -1,0 +1,5 @@
+{"case_id":"monthly-spend","question":"How much did I spend in August 2026?","expected_tool":"get_monthly_summary","expected_display":"GBP 193.45"}
+{"case_id":"grocery-category","question":"What did groceries cost in August 2026?","expected_tool":"get_category_spending","expected_display":"GBP 123.45"}
+{"case_id":"test-merchant","question":"How much did Test Market cost me in August 2026?","expected_tool":"get_merchant_spending","expected_display":"GBP 123.45"}
+{"case_id":"monthly-income","question":"How much income did I receive in August 2026?","expected_tool":"get_monthly_summary","expected_display":"GBP 5,000.00"}
+{"case_id":"empty-month","question":"Did I spend anything in July 2026?","expected_tool":"get_monthly_summary","expected_display":"GBP 0.00"}

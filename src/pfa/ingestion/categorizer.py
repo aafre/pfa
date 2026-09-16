@@ -1,6 +1,7 @@
 import re
 from dataclasses import dataclass
 
+from pfa.domain.accounts import AccountType
 from pfa.domain.transactions import SpendingCategory, TransactionKind, TransferPurpose
 
 
@@ -93,8 +94,36 @@ _RULES: tuple[tuple[str, Classification], ...] = (
 )
 
 
-def classify_known(description: str) -> Classification | None:
+def classify_known(
+    description: str,
+    *,
+    account_type: AccountType | str | None = None,
+    canonical_sign: int | None = None,
+    owned_card: bool = False,
+) -> Classification | None:
     upper = description.upper()
+    if account_type is not None and canonical_sign is not None:
+        account = AccountType(account_type)
+        if (
+            account == AccountType.CREDIT_CARD
+            and canonical_sign > 0
+            and re.search(r"PAYMENT RECEIVED(?:\s|[-])", upper)
+        ):
+            return Classification(
+                TransactionKind.TRANSFER,
+                transfer_purpose=TransferPurpose.CREDIT_CARD_PAYMENT,
+                reason="credit-card payment rule",
+            )
+        if account in {AccountType.CURRENT, AccountType.SAVINGS} and re.search(
+            r"\bAMERICAN EXPRESS\s+DD\b", upper
+        ):
+            if owned_card:
+                return Classification(
+                    TransactionKind.TRANSFER,
+                    transfer_purpose=TransferPurpose.CREDIT_CARD_PAYMENT,
+                    reason="owned card repayment rule",
+                )
+            return Classification(TransactionKind.UNKNOWN, reason="possible card repayment")
     for pattern, classification in _RULES:
         if re.search(rf"(?<![A-Z0-9]){re.escape(pattern)}(?![A-Z0-9])", upper):
             return classification

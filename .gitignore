@@ -223,3 +223,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local scratch / one-off runners / db backups
+scratch/
+*.db.bak
+/main.py

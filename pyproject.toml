@@ -17,6 +17,7 @@ dependencies = [
     "sqlalchemy>=2.0.0",
     "typer>=0.15.0",
     "uvicorn>=0.34.0",
+    "xlrd>=2.0.1",
 ]
 
 [dependency-groups]
@@ -53,3 +54,8 @@ python_version = "3.12"
 strict = true
 mypy_path = "src"
 plugins = ["pydantic.mypy"]
+
+# xlrd (legacy .xls reader) ships no type stubs and has no types-xlrd package.
+[[tool.mypy.overrides]]
+module = "xlrd"
+ignore_missing_imports = true

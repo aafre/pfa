@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PFA_", env_file=".env", extra="ignore")
 
     database_url: str = "sqlite:///data/pfa.db"
+    base_currency: str = "GBP"
     ollama_base_url: str = "http://localhost:11434"
     model: str = "qwen3.5:4b"
     log_level: str = "INFO"

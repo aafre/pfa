@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import typer
@@ -15,11 +16,14 @@ from pfa.ai.agents.categorizer import LocalTransactionClassifier
 from pfa.ai.deps import FinanceDependencies
 from pfa.ai.models import available_models
 from pfa.config import get_settings
-from pfa.db.models import BudgetModel, GoalModel, MerchantRuleModel, TransactionModel
+from pfa.db.models import BudgetModel, GoalModel
+from pfa.domain.errors import ValidationError
 from pfa.domain.money import Money
-from pfa.domain.transactions import ClassificationSource, SpendingCategory
+from pfa.domain.transactions import SpendingCategory
 from pfa.ingestion.service import ImportService
 from pfa.services.answers import deterministic_answer
+from pfa.services.corrections import correct_transaction
+from pfa.services.fx import fetch_and_store_fx_rates
 from pfa.services.health import health_report
 from pfa.services.review import monthly_review_evidence
 from pfa.services.runtime import close_services, open_services
@@ -30,11 +34,13 @@ transactions_app = typer.Typer(help="Transaction commands")
 summary_app = typer.Typer(help="Summary commands")
 budget_app = typer.Typer(help="Budget commands")
 goals_app = typer.Typer(help="Goal commands")
+fx_app = typer.Typer(help="Foreign exchange rate commands")
 app.add_typer(db_app, name="db")
 app.add_typer(transactions_app, name="transactions")
 app.add_typer(summary_app, name="summary")
 app.add_typer(budget_app, name="budget")
 app.add_typer(goals_app, name="goals")
+app.add_typer(fx_app, name="fx")
 console = Console(legacy_windows=False)
 
 
@@ -60,8 +66,8 @@ def _legacy_print_money(minor: int) -> str:
     return f"£{Money(minor).to_major():,.2f}"
 
 
-def print_money(minor: int) -> str:
-    return f"GBP {Money(minor).to_major():,.2f}"
+def print_money(minor: int, currency: str = "GBP") -> str:
+    return f"{currency.upper()} {Money(minor, currency=currency).to_major():,.2f}"
 
 
 @db_app.command("init")
@@ -102,11 +108,14 @@ def import_transactions(path: Path, dry_run: bool = typer.Option(False, "--dry-r
 
 
 @summary_app.command("month")
-def summary_month(month: str | None = typer.Option(None, "--month")) -> None:
+def summary_month(
+    month: str | None = typer.Option(None, "--month"),
+    currency: str = typer.Option("GBP", "--currency"),
+) -> None:
     engine, services = open_services(get_settings())
     try:
-        summary = services.analytics.monthly_summary(parse_month(month))
-        table = Table(title=f"PFA summary {summary.period}")
+        summary = services.analytics.monthly_summary(parse_month(month), currency=currency)
+        table = Table(title=f"PFA summary {summary.period} ({summary.currency})")
         table.add_column("Measure")
         table.add_column("Amount", justify="right")
         for label, value in (
@@ -118,7 +127,7 @@ def summary_month(month: str | None = typer.Option(None, "--month")) -> None:
             ("Investments", summary.investments_minor),
             ("Net cashflow", summary.net_cashflow_minor),
         ):
-            table.add_row(label, print_money(value))
+            table.add_row(label, print_money(value, currency=summary.currency))
         table.add_row("Savings rate", f"{summary.savings_rate_percent:.2f}%")
         console.print(table)
     finally:
@@ -167,24 +176,10 @@ def transactions_correct(
     """Correct one transaction and persist a narrow exact-description rule."""
     engine, services = open_services(get_settings())
     try:
-        row = services.uow.session.get(TransactionModel, transaction_id)
-        if row is None:
-            raise typer.BadParameter(f"transaction {transaction_id} not found")
-        row.category = category.value
-        row.classification_source = ClassificationSource.USER.value
-        row.classification_confidence = 1.0
-        row.classification_reason = "explicit user correction"
-        pattern = row.normalized_description
-        if services.uow.rules.find_pattern(pattern) is None:
-            services.uow.rules.add(
-                MerchantRuleModel(
-                    pattern=pattern,
-                    kind=row.kind,
-                    category=category.value,
-                    transfer_purpose=row.transfer_purpose,
-                    created_from_user_correction=True,
-                )
-            )
+        try:
+            correct_transaction(services.uow, transaction_id, category)
+        except ValidationError as exc:
+            raise typer.BadParameter(str(exc)) from exc
         close_services(engine, services)
         console.print(
             f"Corrected transaction {transaction_id}; "
@@ -229,11 +224,84 @@ def ask(question: str) -> None:
 
 
 @app.command("review")
-def review_month(month: str | None = typer.Option(None, "--month")) -> None:
+def review_month(
+    month: str | None = typer.Option(None, "--month"),
+    currency: str = typer.Option("GBP", "--currency"),
+) -> None:
     engine, services = open_services(get_settings())
     try:
-        evidence = monthly_review_evidence(services.analytics, parse_month(month))
+        evidence = monthly_review_evidence(
+            services.analytics, parse_month(month), currency=currency
+        )
         console.print_json(data=evidence)
+    finally:
+        close_services(engine, services)
+
+
+@fx_app.command("set")
+def fx_set(
+    base_currency: str,
+    quote_currency: str,
+    rate: str,
+    date_str: str | None = typer.Option(None, "--date", "--on"),
+) -> None:
+    try:
+        rate_decimal = Decimal(rate)
+    except InvalidOperation as exc:
+        raise typer.BadParameter(f"invalid rate {rate!r}") from exc
+    effective_at = date.fromisoformat(date_str) if date_str else date.today()
+    engine, services = open_services(get_settings())
+    try:
+        services.uow.fx_rates.set_rate(
+            base_currency.upper(),
+            quote_currency.upper(),
+            rate_decimal,
+            effective_at=effective_at,
+        )
+        close_services(engine, services)
+        pair = f"{base_currency.upper()}/{quote_currency.upper()}"
+        console.print(f"FX rate {pair} = {rate} set for {effective_at}")
+    except Exception:
+        close_services(engine, services, False)
+        raise
+
+
+@fx_app.command("fetch")
+def fx_fetch(
+    base: str = typer.Option("GBP", "--base"),
+    date_str: str | None = typer.Option(None, "--date", "--on"),
+) -> None:
+    effective_at = date.fromisoformat(date_str) if date_str else date.today()
+    engine, services = open_services(get_settings())
+    try:
+        stored = fetch_and_store_fx_rates(
+            services.uow, base_currency=base.upper(), on_date=effective_at
+        )
+        close_services(engine, services)
+        console.print(
+            f"Fetched and stored {len(stored)} rates for {base.upper()} on {effective_at}"
+        )
+    except Exception:
+        close_services(engine, services, False)
+        raise
+
+
+@fx_app.command("list")
+def fx_list() -> None:
+    engine, services = open_services(get_settings())
+    try:
+        table = Table(title="FX Rates")
+        for column in ("Base", "Quote", "Rate", "Effective Date", "Source"):
+            table.add_column(column)
+        for row in services.uow.fx_rates.all():
+            table.add_row(
+                row.base_currency,
+                row.quote_currency,
+                f"{Decimal(row.rate):.6f}",
+                row.effective_at.isoformat(),
+                row.source or "manual",
+            )
+        console.print(table)
     finally:
         close_services(engine, services)
 
@@ -310,6 +378,15 @@ def health() -> None:
 def eval_classifier() -> None:
     """Run the separate real-model classifier evaluation."""
     script = Path(__file__).resolve().parents[3] / "evals" / "classifier.py"
+    result = subprocess.run([sys.executable, str(script)], check=False)
+    if result.returncode:
+        raise typer.Exit(result.returncode)
+
+
+@app.command("eval-grounded-answers")
+def eval_grounded_answers() -> None:
+    """Evaluate tool use and exact seeded facts in local-model answers."""
+    script = Path(__file__).resolve().parents[3] / "evals" / "grounded_answers.py"
     result = subprocess.run([sys.executable, str(script)], check=False)
     if result.returncode:
         raise typer.Exit(result.returncode)

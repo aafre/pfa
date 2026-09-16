@@ -17,8 +17,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fixtures.pdf_builder import build_pdf, statement_page  # noqa: E402
 
+from pfa.domain.transactions import SpendingCategory, TransactionKind  # noqa: E402
 from pfa.ingestion.candidates import ExtractionResult  # noqa: E402
-from pfa.ingestion.extractors.csv import CsvStatementExtractor  # noqa: E402
+from pfa.ingestion.categorizer import Classification  # noqa: E402
+
+
+class _SlowExtractor:
+    """Picklable process worker used to verify hard extraction cancellation."""
+
+    name = "slow_test_extractor"
+
+    def extract(self, source):  # type: ignore[no-untyped-def]
+        with source.path.open("rb"):
+            time.sleep(0.6)
+        return ExtractionResult(candidates=[])
 
 
 def _settings(tmp_path, **overrides) -> Settings:
@@ -93,6 +105,40 @@ def test_preview_patch_commit_flow_reports_correct_counts_at_each_step(tmp_path)
         assert list(settings.upload_dir.iterdir()) == []
 
 
+def test_commit_retries_model_classification_for_unresolved_import_rows(
+    tmp_path, monkeypatch
+) -> None:
+    settings = _settings(tmp_path)
+    calls: list[tuple[str, int]] = []
+
+    class FakeClassifier:
+        def classify(self, description: str, amount_minor: int) -> Classification:
+            calls.append((description, amount_minor))
+            return Classification(
+                TransactionKind.EXPENSE,
+                SpendingCategory.OTHER,
+                source="ai",
+                confidence=0.9,
+                reason="test classifier",
+            )
+
+    monkeypatch.setattr(
+        "pfa.ingestion.batches.LocalTransactionClassifier",
+        lambda _settings: FakeClassifier(),
+    )
+    csv_bytes = _csv_bytes("2026-08-10,ODD MERCHANT 834,-725,Main account\n")
+    with TestClient(create_app(settings)) as client:
+        preview = _upload(client, csv_bytes, account="Main account").json()
+        committed = client.post(f"/imports/{preview['id']}/commit")
+        assert committed.status_code == 200
+        row = client.get("/transactions").json()[0]
+
+    assert calls == [("ODD MERCHANT 834", -72_500)]
+    assert row["kind"] == "expense"
+    assert row["category"] == "other"
+    assert row["classification_source"] == "ai"
+
+
 def test_reupload_of_same_csv_reports_duplicates_and_inserts_nothing_new(tmp_path) -> None:
     settings = _settings(tmp_path)
     csv_bytes = _csv_bytes()
@@ -135,7 +181,7 @@ def test_signed_but_unparseable_pdf_blocks_the_batch_and_leaves_upload_dir_empty
         )
     # Signature passes, so this is an extraction problem, not an upload rejection - the
     # extractor names it, and it must stay sanitized: no staged path, no traceback.
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     body = response.json()
     assert body["status"] == "blocked"
     assert [issue["code"] for issue in body["issues"]] == ["PDF_NOT_EXTRACTABLE"]
@@ -287,19 +333,18 @@ def test_expiry_purge_survives_the_410_response(tmp_path) -> None:
 def test_extraction_timeout_is_reported_and_leaves_no_staged_file(tmp_path, monkeypatch) -> None:
     settings = _settings(tmp_path, extraction_timeout_seconds=0.05)
 
-    def slow_extract(self, source):  # type: ignore[no-untyped-def]
-        # Holds the staged file open past the timeout, which is what makes the request's
-        # own unlink fail on Windows.
-        with source.path.open("rb"):
-            time.sleep(0.6)
-        return ExtractionResult(candidates=[])
-
-    monkeypatch.setattr(CsvStatementExtractor, "extract", slow_extract)
+    monkeypatch.setattr(
+        "pfa.ingestion.batches._extractor_for",
+        lambda *args, **kwargs: _SlowExtractor(),
+    )
 
     with TestClient(create_app(settings), raise_server_exceptions=False) as client:
-        response = _upload(client, _csv_bytes())
+        response = _upload_pdf(
+            client,
+            _pdf_bytes([["2026-08-01", "Slow extraction", "-3.50"]]),
+        )
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     body = response.json()
     assert body["status"] == "failed"
     assert [issue["code"] for issue in body["issues"]] == ["EXTRACTION_TIMEOUT"]
@@ -307,10 +352,7 @@ def test_extraction_timeout_is_reported_and_leaves_no_staged_file(tmp_path, monk
     assert str(settings.upload_dir) not in response.text
     assert "Traceback" not in response.text
 
-    # Cleanup is deferred to the worker thread, so give it until it finishes.
-    deadline = time.monotonic() + 10
-    while list(settings.upload_dir.iterdir()) and time.monotonic() < deadline:
-        time.sleep(0.02)
+    # The timed-out child process is terminated before request cleanup runs.
     assert list(settings.upload_dir.iterdir()) == []
 
 
@@ -375,11 +417,16 @@ def test_reuploading_the_same_pdf_reports_duplicates_and_imports_nothing(tmp_pat
     pdf = _pdf_bytes([["2026-08-01", "Salary", "2000.00"]])
     with TestClient(create_app(settings)) as client:
         first = _upload_pdf(client, pdf, account="Main account")
-        client.post(f"/imports/{first.json()['id']}/commit")
+        first_id = first.json()["id"]
+        # Single-column all-positive statement: the sign convention must be stated
+        # before it can commit.
+        client.patch(f"/imports/{first_id}", json={"amount_sign": "as_written"})
+        client.post(f"/imports/{first_id}/commit")
 
         second = _upload_pdf(client, pdf, account="Main account")
         body = second.json()
         assert body["counts"]["duplicate"] == 1
+        client.patch(f"/imports/{body['id']}", json={"amount_sign": "as_written"})
         commit = client.post(f"/imports/{body['id']}/commit")
         assert commit.json()["counts"]["imported"] == 0
 
@@ -473,6 +520,36 @@ def test_unsigned_credit_card_csv_is_never_silently_booked_as_income(tmp_path) -
         assert by_description["PAYMENT RECEIVED THANK YOU"]["flow_direction"] == "credit"
 
 
+def test_all_positive_generic_statement_cannot_commit_without_a_sign_convention(tmp_path) -> None:
+    """Every row unsigned: genuinely ambiguous. Assigning an account must not unblock it."""
+    settings = _settings(tmp_path)
+    all_positive = (
+        b"date,description,amount,account\n"
+        b"2026-08-19,AMZN MKTPLACE,25.92,Card\n"
+        b"2026-08-20,TESCO,14.10,Card\n"
+    )
+    with TestClient(create_app(settings)) as client:
+        body = _upload(client, all_positive, filename="card.csv").json()
+        batch_id = body["id"]
+        assert body["amount_sign"] is None
+        # Blocked in the preview itself, before any commit attempt.
+        assert body["status"] == "blocked"
+        assert any(i["code"] == "GENERIC_SIGN_CONFIRMATION_REQUIRED" for i in body["issues"])
+
+        # Assigning an account does not clear the ambiguity.
+        assigned = client.patch(f"/imports/{batch_id}", json={"account": "Card"}).json()
+        assert assigned["status"] == "blocked"
+        assert client.post(f"/imports/{batch_id}/commit").status_code == 409
+
+        after_sign = client.patch(
+            f"/imports/{batch_id}", json={"amount_sign": "debit_positive"}
+        ).json()
+        assert after_sign["status"] == "preview_ready"
+        committed = client.post(f"/imports/{batch_id}/commit")
+        assert committed.status_code == 200
+        assert committed.json()["counts"]["imported"] == 2
+
+
 def test_two_column_statements_ignore_the_amount_sign_convention(tmp_path) -> None:
     """A source that states the direction in its own columns is not in doubt."""
     settings = _settings(tmp_path)
@@ -546,3 +623,173 @@ def test_amount_sign_is_persisted_and_survives_a_refresh_and_later_patches(tmp_p
         assert committed["candidates"] == []
         assert committed["amount_sign"] == "debit_positive"
         assert fresh_client.get(f"/imports/{batch_id}").json()["amount_sign"] == "debit_positive"
+
+
+def test_counts_valid_decrements_when_candidates_excluded(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        body = _upload(client, _csv_bytes()).json()
+        batch_id = body["id"]
+        assert body["counts"]["valid"] == 3
+        assert body["counts"]["excluded"] == 0
+
+        c_ids = [c["candidate_id"] for c in body["candidates"]]
+
+        # Exclude 1 candidate
+        p1 = client.patch(
+            f"/imports/{batch_id}", json={"excluded_candidate_ids": [c_ids[0]]}
+        ).json()
+        assert p1["counts"]["valid"] == 2
+        assert p1["counts"]["excluded"] == 1
+
+        # Exclude 2 candidates
+        p2 = client.patch(
+            f"/imports/{batch_id}", json={"excluded_candidate_ids": [c_ids[0], c_ids[1]]}
+        ).json()
+        assert p2["counts"]["valid"] == 1
+        assert p2["counts"]["excluded"] == 2
+
+        # Re-include all candidates
+        p3 = client.patch(f"/imports/{batch_id}", json={"excluded_candidate_ids": []}).json()
+        assert p3["counts"]["valid"] == 3
+        assert p3["counts"]["excluded"] == 0
+
+
+def _amex_detected_csv_bytes() -> bytes:
+    return (
+        b"Date,Description,Amount,Card Member\n"
+        b"19/08/2026,AMZN MKTPLACE,25.92,John Doe\n"
+        b"19/08/2026,MARYLEBONE STATION,7.00,John Doe\n"
+        b"21/08/2026,PAYMENT RECEIVED - THANK YOU,-150.00,John Doe\n"
+    )
+
+
+def test_non_hdfc_amex_adapter_institution_binding_and_inline_correction(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        # Pre-existing credit card account with missing institution (legacy account)
+        acc_resp = client.post(
+            "/accounts",
+            json={"name": "Legacy Amex Card", "account_type": "credit_card", "currency": "GBP"},
+        )
+        assert acc_resp.status_code == 200
+        account_id = acc_resp.json()["id"]
+        assert acc_resp.json()["institution"] is None
+
+        # Upload Amex statement
+        body = _upload(client, _amex_detected_csv_bytes(), filename="amex.csv").json()
+        batch_id = body["id"]
+        assert body["adapter_id"] == "amex_uk_csv"
+        assert body["detected_institution"] == "American Express"
+
+        # Binding to existing legacy account without institution triggers requirement
+        patched = client.patch(
+            f"/imports/{batch_id}", json={"destination_account_id": account_id}
+        ).json()
+        assert patched["status"] == "blocked"
+        issue_codes = [i["code"] for i in patched["issues"]]
+        assert "ACCOUNT_INSTITUTION_REQUIRED" in issue_codes
+
+        # Committing while blocked is rejected
+        commit_blocked = client.post(f"/imports/{batch_id}/commit")
+        assert commit_blocked.status_code == 409
+
+        # Reject mismatched institution correction
+        bad_patch = client.patch(
+            f"/imports/{batch_id}",
+            json={
+                "destination_account_id": account_id,
+                "account_metadata_update": {"institution": "HSBC"},
+            },
+        )
+        assert bad_patch.status_code == 422
+        assert bad_patch.json()["detail"]["code"] == "INVALID_ACCOUNT_METADATA_UPDATE"
+
+        # Valid inline correction for American Express
+        good_patch = client.patch(
+            f"/imports/{batch_id}",
+            json={
+                "destination_account_id": account_id,
+                "account_metadata_update": {"institution": "American Express"},
+            },
+        )
+        assert good_patch.status_code == 200
+        good_body = good_patch.json()
+        assert good_body["status"] == "preview_ready"
+        assert not any(i["code"] == "ACCOUNT_INSTITUTION_REQUIRED" for i in good_body["issues"])
+
+        # Account now has stored institution
+        accounts = client.get("/accounts").json()
+        matching_acc = next(a for a in accounts if a["id"] == account_id)
+        assert matching_acc["institution"] == "American Express"
+
+        # Once institution is set, subsequent metadata updates to change it are rejected
+        duplicate_update = client.patch(
+            f"/imports/{batch_id}",
+            json={
+                "destination_account_id": account_id,
+                "account_metadata_update": {"institution": "American Express"},
+            },
+        )
+        assert duplicate_update.status_code == 422
+
+        # Batch commits successfully
+        committed = client.post(f"/imports/{batch_id}/commit")
+        assert committed.status_code == 200
+        assert committed.json()["status"] == "committed"
+        assert committed.json()["counts"]["imported"] == 3
+
+
+def test_list_import_batches_endpoint_and_filtering(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        # Initial: empty list
+        assert client.get("/imports").json() == []
+
+        # Upload first batch and commit it
+        b1 = _upload(client, _csv_bytes(), filename="statement_1.csv").json()
+        client.patch(f"/imports/{b1['id']}", json={"account": "Account 1"})
+        client.post(f"/imports/{b1['id']}/commit")
+
+        # Upload second batch and leave it in preview
+        b2 = _upload(client, _csv_bytes(), filename="statement_2.csv").json()
+
+        # List all imports
+        all_imports = client.get("/imports").json()
+        assert len(all_imports) == 2
+        # Sorted by created_at desc (b2 was created after b1)
+        assert [b["id"] for b in all_imports] == [b2["id"], b1["id"]]
+
+        # Filter by status
+        committed_only = client.get("/imports?status=committed").json()
+        assert len(committed_only) == 1
+        assert committed_only[0]["id"] == b1["id"]
+
+        preview_only = client.get("/imports?status=preview_ready").json()
+        assert len(preview_only) == 1
+        assert preview_only[0]["id"] == b2["id"]
+
+        # Limit
+        limited = client.get("/imports?limit=1").json()
+        assert len(limited) == 1
+        assert limited[0]["id"] == b2["id"]
+
+
+def test_undo_import_batch_updates_batch_status_and_ledger(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        b = _upload(client, _csv_bytes(), filename="transactions.csv").json()
+        client.patch(f"/imports/{b['id']}", json={"account": "Ledger Account"})
+        committed = client.post(f"/imports/{b['id']}/commit").json()
+        assert committed["status"] == "committed"
+        assert len(client.get("/transactions").json()) == 3
+
+        # Undo the batch
+        undone = client.post(f"/imports/{b['id']}/undo").json()
+        assert undone["status"] == "undone"
+        assert len(client.get("/transactions").json()) == 0
+
+        # Listed in GET /imports as undone
+        history = client.get("/imports").json()
+        assert len(history) == 1
+        assert history[0]["status"] == "undone"

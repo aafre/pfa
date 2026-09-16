@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#16252e" />
     <title>PFA — Personal Finance Agent</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?t=178837" />
   </head>
   <body>
     <div class="app-shell">
@@ -91,6 +91,7 @@
               <p class="lede" id="view-lede">A clear read on what changed, what matters, and where to look next.</p>
             </div>
             <div class="month-controls" aria-label="Choose period">
+              <select class="currency-select" id="currency-select" aria-label="Ledger currency" hidden></select>
               <button class="month-arrow" type="button" data-month-step="-1" aria-label="Previous month">←</button>
               <button class="month-current" type="button" id="month-current" aria-haspopup="listbox" aria-expanded="false">
                 <span class="calendar-mini" aria-hidden="true"></span>
@@ -259,7 +260,8 @@
                     </div>
                     <div class="dropzone-text">
                       <h3>Drag &amp; drop bank statement here</h3>
-                      <p>Supports <strong>PDF Statements</strong>, <strong>CSV exports</strong>, or <strong>scanned documents</strong></p>
+                      <p>Supports <strong>PDF statements</strong>, <strong>CSV exports</strong>, or <strong>HDFC Delimited text</strong></p>
+                      <small>HDFC customers: choose <strong>Delimited</strong> when downloading.</small>
                     </div>
                     <button class="button-primary" type="button" id="browse-button">
                       Browse Files
@@ -268,6 +270,8 @@
                       <span class="format-pill">PDF with native text</span>
                       <span class="format-pill">PDF with OCR fallback</span>
                       <span class="format-pill">Bank CSV exports</span>
+                      <span class="format-pill">HDFC Delimited .txt</span>
+                      <span class="format-pill">Excel .xls workbooks</span>
                     </div>
                   </div>
                 </div>
@@ -277,6 +281,15 @@
                   <div class="progress-details">
                     <strong id="progress-text">Extracting candidates from statement...</strong>
                     <small>Parsing transaction rows and detecting account structure</small>
+                  </div>
+                </div>
+
+                <div class="upload-password-bar" id="upload-password-wrap" style="margin-top: 16px; padding: 20px; background: var(--surface-raised); border: 1px solid var(--amber); border-radius: var(--radius);" hidden>
+                  <strong style="display:block; margin-bottom: 6px; color: var(--ink);">🔒 Statement Password Required</strong>
+                  <p style="font-size: 12px; color: var(--muted); margin-bottom: 12px;">This PDF is encrypted by your bank. Enter your statement password to decrypt it.</p>
+                  <div style="display:flex; gap: 8px;">
+                    <input type="password" id="statement-password-input" class="text-input" placeholder="Enter bank password (e.g. customer ID / DOB)" style="flex:1;" />
+                    <button type="button" class="button-primary" id="unlock-statement-btn">Unlock &amp; Import</button>
                   </div>
                 </div>
               </div>
@@ -296,11 +309,51 @@
                   </div>
 
                   <div class="account-selector-wrap">
-                    <label for="destination-account-input" class="account-label">Target Account:</label>
+                    <label for="destination-account-select" class="account-label">Target account:</label>
                     <div class="account-input-group">
-                      <input list="known-accounts-list" id="destination-account-input" class="text-input" placeholder="e.g. Main Checking" />
-                      <datalist id="known-accounts-list"></datalist>
+                      <select id="destination-account-select" class="select-input" aria-describedby="account-help">
+                        <option value="">Choose an existing account</option>
+                      </select>
                       <button class="button-secondary" type="button" id="save-account-btn">Assign</button>
+                    </div>
+                    <details class="new-account-details" id="new-account-details">
+                      <summary>Create a new account</summary>
+                      <div class="account-input-group">
+                        <label class="sr-only" for="new-account-name">New account name</label>
+                        <input id="new-account-name" class="text-input" placeholder="Account name" />
+                        <label class="sr-only" for="new-account-type">New account type</label>
+                        <select id="new-account-type" class="select-input">
+                          <option value="current">Current account</option>
+                          <option value="savings">Savings</option>
+                          <option value="credit_card">Credit card</option>
+                          <option value="cash">Cash</option>
+                          <option value="investment">Investment</option>
+                          <option value="loan">Loan</option>
+                        </select>
+                      </div>
+                      <div id="hdfc-account-fields" hidden>
+                        <div class="account-input-group">
+                          <label for="new-account-currency">Currency</label>
+                          <input id="new-account-currency" class="text-input" value="INR" readonly />
+                          <label class="checkbox-label"><input id="confirm-account-currency" type="checkbox" /> Confirm INR</label>
+                        </div>
+                        <div class="account-input-group">
+                          <label for="new-account-institution">Institution</label>
+                          <input id="new-account-institution" class="text-input" value="hdfc_bank" readonly />
+                        </div>
+                        <div class="account-input-group">
+                          <label for="new-account-opening-balance">Derived opening balance</label>
+                          <input id="new-account-opening-balance" class="text-input" type="number" step="0.01" />
+                          <label for="new-account-opening-as-of">As of</label>
+                          <input id="new-account-opening-as-of" class="text-input" type="date" />
+                        </div>
+                        <label class="checkbox-label"><input id="confirm-opening-balance" type="checkbox" /> Confirm the derived opening balance</label>
+                        <small id="hdfc-opening-help">The suggested balance is derived from the first statement row.</small>
+                      </div>
+                      <small id="account-help">Account names are labels; PFA binds imports by account ID.</small>
+                    </details>
+                    <div id="hdfc-legacy-correction" hidden>
+                      <label class="checkbox-label"><input id="mark-hdfc-account" type="checkbox" /> <span id="mark-institution-label">Mark this legacy account as HDFC Bank</span></label>
                     </div>
                   </div>
                 </div>
@@ -321,6 +374,9 @@
                   </div>
                 </div>
 
+                <div class="batch-semantic-summary" id="batch-semantic-summary" aria-live="polite"></div>
+                <div class="batch-reconciliation" id="batch-reconciliation" aria-live="polite"></div>
+
                 <!-- BATCH STATS & FILTERS -->
                 <div class="batch-metrics-bar">
                   <div class="batch-filter-tabs" role="tablist">
@@ -332,6 +388,9 @@
                     </button>
                     <button class="filter-tab" type="button" role="tab" data-filter="warning" id="tab-warning">
                       Warnings <span class="tab-badge badge-amber" id="count-warning">0</span>
+                    </button>
+                    <button class="filter-tab" type="button" role="tab" data-filter="error" id="tab-error">
+                      Errors <span class="tab-badge badge-red" id="count-error">0</span>
                     </button>
                     <button class="filter-tab" type="button" role="tab" data-filter="duplicate" id="tab-duplicate">
                       Duplicates <span class="tab-badge badge-neutral" id="count-duplicate">0</span>
@@ -395,10 +454,41 @@
                   <div class="success-actions">
                     <a class="button-primary" href="#overview">View Updated Overview</a>
                     <a class="button-secondary" href="#activity">View Activity Ledger</a>
+                    <button class="button-ghost" type="button" id="undo-import-btn">Undo import</button>
                     <button class="button-ghost" type="button" id="upload-another-btn">Upload Another Statement</button>
                   </div>
                 </div>
               </div>
+
+              <!-- IMPORT HISTORY -->
+              <section class="panel import-history-panel" id="import-history-section">
+                <div class="panel-header">
+                  <div>
+                    <p class="eyebrow">Audit &amp; Undo</p>
+                    <h2>Import History</h2>
+                  </div>
+                  <button class="button-ghost" type="button" id="refresh-history-btn">Refresh</button>
+                </div>
+                <div class="table-responsive">
+                  <table class="history-table" aria-label="Statement Import History">
+                    <thead>
+                      <tr>
+                        <th scope="col">Statement</th>
+                        <th scope="col">Target Account</th>
+                        <th scope="col">Status</th>
+                        <th scope="col">Imported</th>
+                        <th scope="col">Date</th>
+                        <th scope="col" class="th-right">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody id="import-history-tbody">
+                      <tr>
+                        <td colspan="6" class="history-empty">Loading import history...</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
             </div>
           </section>
 
@@ -516,7 +606,7 @@
                         <strong>PFA Financial Investigation Desk</strong>
                         <span class="provenance-tag tag-deterministic">Deterministic Engine Active</span>
                       </div>
-                      <p>Ask any question about your finances. When possible, answers are calculated directly from your local SQLite ledger with zero hallucination. When using the AI model, facts used are explicitly provided.</p>
+                      <p>Ask any question about your finances. Answers are calculated from your local ledger when possible; model-assisted answers show the facts they used.</p>
                     </div>
                   </div>
                 </div>
@@ -580,9 +670,25 @@
       </div>
     </dialog>
 
+    <!-- UNDO CONFIRMATION DIALOG -->
+    <dialog class="evidence-dialog" id="undo-confirm-dialog" aria-labelledby="undo-dialog-title">
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">Confirm Undo</p>
+          <h2 id="undo-dialog-title">Undo Statement Import</h2>
+        </div>
+        <button class="dialog-close" type="button" id="undo-dialog-close-x" aria-label="Cancel">×</button>
+      </div>
+      <p class="dialog-lede" id="undo-dialog-message">Are you sure you want to undo this statement import?</p>
+      <div class="dialog-actions">
+        <button class="button-secondary" type="button" id="undo-dialog-cancel">Cancel</button>
+        <button class="button-destructive" type="button" id="undo-dialog-confirm">Confirm &amp; Remove Rows</button>
+      </div>
+    </dialog>
+
     <!-- TOAST NOTIFICATION -->
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script src="/static/app.js" defer></script>
+    <script src="/static/app.js?t=178837" defer></script>
   </body>
 </html>
