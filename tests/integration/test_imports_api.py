@@ -17,8 +17,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fixtures.pdf_builder import build_pdf, statement_page  # noqa: E402
 
+from pfa.domain.transactions import SpendingCategory, TransactionKind  # noqa: E402
 from pfa.ingestion.candidates import ExtractionResult  # noqa: E402
-from pfa.ingestion.extractors.csv import CsvStatementExtractor  # noqa: E402
+from pfa.ingestion.categorizer import Classification  # noqa: E402
+
+
+class _SlowExtractor:
+    """Picklable process worker used to verify hard extraction cancellation."""
+
+    name = "slow_test_extractor"
+
+    def extract(self, source):  # type: ignore[no-untyped-def]
+        with source.path.open("rb"):
+            time.sleep(0.6)
+        return ExtractionResult(candidates=[])
 
 
 def _settings(tmp_path, **overrides) -> Settings:
@@ -93,6 +105,40 @@ def test_preview_patch_commit_flow_reports_correct_counts_at_each_step(tmp_path)
         assert list(settings.upload_dir.iterdir()) == []
 
 
+def test_commit_retries_model_classification_for_unresolved_import_rows(
+    tmp_path, monkeypatch
+) -> None:
+    settings = _settings(tmp_path)
+    calls: list[tuple[str, int]] = []
+
+    class FakeClassifier:
+        def classify(self, description: str, amount_minor: int) -> Classification:
+            calls.append((description, amount_minor))
+            return Classification(
+                TransactionKind.EXPENSE,
+                SpendingCategory.OTHER,
+                source="ai",
+                confidence=0.9,
+                reason="test classifier",
+            )
+
+    monkeypatch.setattr(
+        "pfa.ingestion.batches.LocalTransactionClassifier",
+        lambda _settings: FakeClassifier(),
+    )
+    csv_bytes = _csv_bytes("2026-08-10,ODD MERCHANT 834,-725,Main account\n")
+    with TestClient(create_app(settings)) as client:
+        preview = _upload(client, csv_bytes, account="Main account").json()
+        committed = client.post(f"/imports/{preview['id']}/commit")
+        assert committed.status_code == 200
+        row = client.get("/transactions").json()[0]
+
+    assert calls == [("ODD MERCHANT 834", -72_500)]
+    assert row["kind"] == "expense"
+    assert row["category"] == "other"
+    assert row["classification_source"] == "ai"
+
+
 def test_reupload_of_same_csv_reports_duplicates_and_inserts_nothing_new(tmp_path) -> None:
     settings = _settings(tmp_path)
     csv_bytes = _csv_bytes()
@@ -135,7 +181,7 @@ def test_signed_but_unparseable_pdf_blocks_the_batch_and_leaves_upload_dir_empty
         )
     # Signature passes, so this is an extraction problem, not an upload rejection - the
     # extractor names it, and it must stay sanitized: no staged path, no traceback.
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     body = response.json()
     assert body["status"] == "blocked"
     assert [issue["code"] for issue in body["issues"]] == ["PDF_NOT_EXTRACTABLE"]
@@ -287,19 +333,18 @@ def test_expiry_purge_survives_the_410_response(tmp_path) -> None:
 def test_extraction_timeout_is_reported_and_leaves_no_staged_file(tmp_path, monkeypatch) -> None:
     settings = _settings(tmp_path, extraction_timeout_seconds=0.05)
 
-    def slow_extract(self, source):  # type: ignore[no-untyped-def]
-        # Holds the staged file open past the timeout, which is what makes the request's
-        # own unlink fail on Windows.
-        with source.path.open("rb"):
-            time.sleep(0.6)
-        return ExtractionResult(candidates=[])
-
-    monkeypatch.setattr(CsvStatementExtractor, "extract", slow_extract)
+    monkeypatch.setattr(
+        "pfa.ingestion.batches._extractor_for",
+        lambda *args, **kwargs: _SlowExtractor(),
+    )
 
     with TestClient(create_app(settings), raise_server_exceptions=False) as client:
-        response = _upload(client, _csv_bytes())
+        response = _upload_pdf(
+            client,
+            _pdf_bytes([["2026-08-01", "Slow extraction", "-3.50"]]),
+        )
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     body = response.json()
     assert body["status"] == "failed"
     assert [issue["code"] for issue in body["issues"]] == ["EXTRACTION_TIMEOUT"]
@@ -307,10 +352,7 @@ def test_extraction_timeout_is_reported_and_leaves_no_staged_file(tmp_path, monk
     assert str(settings.upload_dir) not in response.text
     assert "Traceback" not in response.text
 
-    # Cleanup is deferred to the worker thread, so give it until it finishes.
-    deadline = time.monotonic() + 10
-    while list(settings.upload_dir.iterdir()) and time.monotonic() < deadline:
-        time.sleep(0.02)
+    # The timed-out child process is terminated before request cleanup runs.
     assert list(settings.upload_dir.iterdir()) == []
 
 

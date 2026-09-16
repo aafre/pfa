@@ -13,11 +13,15 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import logging
+import multiprocessing
 import uuid
 from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
+from multiprocessing.connection import Connection
+from typing import cast
 
+from pfa.ai.agents.categorizer import LocalTransactionClassifier
 from pfa.config import Settings
 from pfa.db.models import AccountModel, ImportBatchModel
 from pfa.db.unit_of_work import UnitOfWork
@@ -246,29 +250,72 @@ def _extractor_for(
     return CsvStatementExtractor(dialect=dialect, currency=account_currency)
 
 
+def _extraction_worker(
+    connection: Connection, extractor: StatementExtractor, source: StatementSource
+) -> None:
+    try:
+        result = extractor.extract(source)
+        connection.send(("ok", result))
+    except BaseException as exc:  # pragma: no cover - child boundary
+        connection.send(("error", type(exc).__name__, str(exc)))
+    finally:
+        connection.close()
+
+
 def _run_extraction(
     extractor: StatementExtractor, source: StatementSource, settings: Settings
 ) -> ExtractionResult:
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    future: concurrent.futures.Future[ExtractionResult] = pool.submit(extractor.extract, source)
+    """Use hard cancellation for PDF/OCR; keep lightweight text parsing in a thread."""
+
+    if source.path.suffix.lower() != ".pdf":
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future: concurrent.futures.Future[ExtractionResult] = pool.submit(extractor.extract, source)
+        try:
+            return future.result(timeout=settings.extraction_timeout_seconds)
+        except concurrent.futures.TimeoutError:
+
+            def _cleanup(_: concurrent.futures.Future[ExtractionResult]) -> None:
+                import time
+
+                for _attempt in range(5):
+                    try:
+                        source.path.unlink(missing_ok=True)
+                        return
+                    except (PermissionError, OSError):
+                        time.sleep(0.5)
+
+            future.add_done_callback(_cleanup)
+            raise
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_extraction_worker, args=(child, extractor, source), daemon=True
+    )
     try:
-        return future.result(timeout=settings.extraction_timeout_seconds)
-    except concurrent.futures.TimeoutError:
-
-        def _cleanup(_: concurrent.futures.Future[ExtractionResult]) -> None:
-            import time
-
-            for _attempt in range(5):
-                try:
-                    source.path.unlink(missing_ok=True)
-                    return
-                except (PermissionError, OSError):
-                    time.sleep(0.5)
-
-        future.add_done_callback(_cleanup)
+        process.start()
+    except BaseException:
+        parent.close()
+        child.close()
         raise
+    child.close()
+    try:
+        if not parent.poll(settings.extraction_timeout_seconds):
+            process.terminate()
+            process.join(timeout=2)
+            raise concurrent.futures.TimeoutError
+        payload = parent.recv()
+        process.join(timeout=2)
+        if payload[0] == "ok":
+            return cast(ExtractionResult, payload[1])
+        raise RuntimeError(f"{payload[1]}: {payload[2]}")
     finally:
-        pool.shutdown(wait=False, cancel_futures=True)
+        if process.is_alive():
+            process.terminate()
+        process.join(timeout=2)
+        parent.close()
 
 
 def _fail(batch: ImportBatchModel, uow: UnitOfWork, code: str, message: str) -> ImportBatchModel:
@@ -968,7 +1015,9 @@ def commit_batch(uow: UnitOfWork, batch_id: str, settings: Settings) -> ImportBa
         for candidate in candidates:
             candidate.account_id = account.id
             candidate.account_hint = account.name
-    service = ImportService(uow)
+    # Re-run classification after candidate edits and account binding, immediately
+    # before persistence. Existing explicit classifications and merchant rules win.
+    service = ImportService(uow, LocalTransactionClassifier(settings))
     service.validate(candidates)
     service.resolve_duplicates(candidates)  # recheck against the ledger right before commit
 

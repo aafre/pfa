@@ -479,9 +479,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise
         finally:
             # open_services() belongs inside this boundary: a database that won't open
-            # must not strand the staged statement. The unlink can still lose to a
-            # timed-out extraction thread holding the file open (Windows); _run_extraction
-            # owns cleanup in that case, so a failed unlink here is not an error.
+            # must not strand the staged statement. CSV/HDFC timeout cleanup may still
+            # race a parser thread on Windows; PDF workers are terminated before return.
             with suppress(OSError):
                 source.path.unlink(missing_ok=True)
 
